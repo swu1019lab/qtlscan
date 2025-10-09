@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title or 'QTLScan Prediction Report' }}</title>
+  <style>
+    :root{
+      --bg:#f8fafc; --fg:#0f172a; --muted:#475569; --card:#ffffff; --border:#e2e8f0; --accent:#2563eb; --accent2:#16a34a; --warn:#ca8a04; --bad:#dc2626;
+    }
+    *{box-sizing:border-box}
+    body{margin:0; font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'PingFang SC', 'Microsoft YaHei', sans-serif; background:var(--bg); color:var(--fg); line-height:1.55}
+    header{padding:28px 16px; background:linear-gradient(90deg, rgba(37,99,235,.08), rgba(22,163,74,.08)); border-bottom:1px solid var(--border); text-align:center}
+    h1{margin:0; font-size:26px; letter-spacing:.3px}
+    .subtitle{margin-top:6px; color:var(--muted); font-size:13px}
+    main{padding:24px 16px; max-width:1200px; margin:0 auto}
+    .grid{display:grid; grid-template-columns: repeat(12, 1fr); gap:16px}
+    .card{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; box-shadow:0 2px 6px rgba(0,0,0,.05)}
+    .muted{color:var(--muted); font-size:12px}
+    .kv{display:grid; grid-template-columns: 180px 1fr; gap:10px; font-size:14px}
+    .pill{display:inline-block; padding:3px 10px; border-radius:999px; background:rgba(37,99,235,.12); color:var(--accent); font-size:12px}
+  table{width:100%; border-collapse: collapse; font-size:13px; background:#fff; border:1px solid var(--border); overflow:auto; display:block; table-layout: fixed}
+    thead{position:sticky; top:0; z-index:1}
+  th,td{border-bottom:1px solid var(--border); padding:10px 12px; text-align:left; white-space:nowrap}
+  td{overflow:hidden; text-overflow:ellipsis}
+    th{color:#111827; font-weight:600; background:#f1f5f9}
+    img{max-width:100%; height:auto; border-radius:10px; border:1px solid var(--border)}
+    .figure-grid{display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:16px; align-items:start}
+  .figure-grid.sm img{max-height:260px; object-fit:contain}
+    .figure-item{display:flex; flex-direction:column; gap:8px}
+    .nowrap{white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+    footer{padding:24px 16px; color:var(--muted); font-size:12px; text-align:center}
+    .small{font-size:12px}
+    .two-col{columns: 2; column-gap: 16px}
+    .chip{display:inline-block; padding:3px 8px; background:#f1f5f9; border:1px solid var(--border); border-radius:8px; margin:2px; font-size:12px}
+    h3{margin:0 0 12px; font-size:16px}
+    h4{margin:6px 0 8px; font-size:14px; color:#111827}
+    .tlabel{font-weight:600; font-size:13px; color:#334155; margin:6px 0 6px}
+    .full-bleed{width:100vw; margin-left:50%; transform:translateX(-50%)}
+  /* responsive */
+    @media (max-width: 720px) {
+      .kv{grid-template-columns: 1fr}
+      .grid{grid-template-columns: 1fr}
+      .two-col{columns:1}
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>{{ title or 'QTLScan Prediction Report' }}</h1>
+    <div class="subtitle">Generated at {{ generated_at }} · Version {{ version or '1.0.0' }}</div>
+  </header>
+  <main>
+    <!-- Overview -->
+    <section class="grid" style="margin-bottom:16px">
+      <div class="card" style="grid-column: span 7">
+        <h3>Overview</h3>
+        <div class="kv">
+          <div class="muted">VCF</div><div class="nowrap" title="{{ vcf_path }}">{{ vcf_path }}</div>
+          <div class="muted">Phenotype</div><div class="nowrap" title="{{ phe_path }}">{{ phe_path }}</div>
+          <div class="muted">Samples</div><div>{{ n_samples }}</div>
+          <div class="muted">Variants</div><div>{{ n_variants }}</div>
+          <div class="muted">Model</div><div><span class="pill">{{ model_name }}</span> · {{ target_type }}</div>
+          <div class="muted">Hyperparameter Tuning</div><div>{{ tune or 'none' }}</div>
+          <div class="muted">Variant Selection</div><div>{{ selection_desc }}</div>
+        </div>
+      </div>
+      <div class="card" style="grid-column: span 5">
+        <h3>Run Configuration</h3>
+        <div class="kv">
+          <div class="muted">Test size</div><div>{{ test_size }}</div>
+          <div class="muted">CV folds</div><div>{{ cv }}</div>
+          <div class="muted">Random seed</div><div>{{ seed }}</div>
+          <div class="muted">Imputation</div><div>{{ impute }}</div>
+          <div class="muted">Feature scaling</div><div>{{ scale }}</div>
+          <div class="muted">Importance</div><div>{{ importance }}</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Metrics preview (head), grouped and collapsible per trait -->
+    {% if metrics and metrics_columns %}
+    <section class="card" style="margin-bottom:16px">
+      <h3>Evaluation Metrics (preview)</h3>
+      {% set trait_list = [] %}
+      {% for r in metrics %}
+        {% set t = r['trait'] if 'trait' in r else None %}
+        {% if t is not none and t not in trait_list %}{% set _ = trait_list.append(t) %}{% endif %}
+      {% endfor %}
+
+      {% for t in trait_list %}
+        <details class="mblock" {% if loop.index0 == 0 %}open{% endif %}>
+          <summary style="cursor:pointer; font-weight:600; color:#111827">Trait: {{ t }} (preview)</summary>
+          <div style="margin-top:8px">
+            <table>
+              <thead>
+                <tr>
+                  {% for col in metrics_columns %}
+                    <th>{{ col }}</th>
+                  {% endfor %}
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in metrics %}
+                  {% if row['trait'] == t %}
+                  <tr>
+                    {% for col in metrics_columns %}
+                      <td>{{ row[col] }}</td>
+                    {% endfor %}
+                  </tr>
+                  {% endif %}
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      {% endfor %}
+    </section>
+    {% endif %}
+
+    <!-- Final model parameters -->
+    {% if model_params_items %}
+    <section class="card" style="margin-bottom:16px">
+      <h3>Final Model Parameters</h3>
+      <div class="two-col">
+        {% for k, v in model_params_items %}
+          <div class="chip"><b>{{ k }}</b>: {{ v }}</div>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
+    <!-- Figures grouped by type -->
+    {% if figures and figures|length > 0 %}
+    <section class="card" style="margin-bottom:16px">
+      <h3>Figures</h3>
+
+      {# Pred vs Obs #}
+      {% set ns = namespace(has=false) %}
+      {% for fig in figures %}
+        {% if 'pred_vs_obs' in fig.caption %}{% set ns.has = true %}{% endif %}
+      {% endfor %}
+      {% if ns.has %}
+        <h4>Pred vs Obs</h4>
+        {% set ns_traits = namespace(list=[]) %}
+        {% for fig in figures %}
+          {% if 'pred_vs_obs' in fig.caption %}
+            {% set after = fig.caption.split('pred_vs_obs.') %}
+            {% set tr = after[1].split('.')[0] if after|length > 1 else '' %}
+            {% if tr and tr not in ns_traits.list %}{% set _ = ns_traits.list.append(tr) %}{% endif %}
+          {% endif %}
+        {% endfor %}
+        {% for tr in ns_traits.list %}
+          <div class="tlabel">Trait: {{ tr }}</div>
+          <div class="figure-grid sm" style="margin-bottom:8px">
+            {% for fig in figures %}
+              {% if 'pred_vs_obs' in fig.caption %}
+                {% set after = fig.caption.split('pred_vs_obs.') %}
+                {% set tr2 = after[1].split('.')[0] if after|length > 1 else '' %}
+                {% if tr2 == tr %}
+                <div class="figure-item">
+                  <img src="{{ fig.src }}" alt="{{ fig.caption }}" />
+                  <div class="muted small">{{ fig.caption }}</div>
+                </div>
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+          </div>
+        {% endfor %}
+      {% endif %}
+
+      {# Residuals #}
+      {% set ns = namespace(has=false) %}
+      {% for fig in figures %}
+        {% if 'residuals' in fig.caption %}{% set ns.has = true %}{% endif %}
+      {% endfor %}
+      {% if ns.has %}
+        <h4>Residuals</h4>
+        {% set ns_traits = namespace(list=[]) %}
+        {% for fig in figures %}
+          {% if 'residuals' in fig.caption %}
+            {% set after = fig.caption.split('residuals.') %}
+            {% set tr = after[1].split('.')[0] if after|length > 1 else '' %}
+            {% if tr and tr not in ns_traits.list %}{% set _ = ns_traits.list.append(tr) %}{% endif %}
+          {% endif %}
+        {% endfor %}
+        {% for tr in ns_traits.list %}
+          <div class="tlabel">Trait: {{ tr }}</div>
+          <div class="figure-grid sm" style="margin-bottom:8px">
+            {% for fig in figures %}
+              {% if 'residuals' in fig.caption %}
+                {% set after = fig.caption.split('residuals.') %}
+                {% set tr2 = after[1].split('.')[0] if after|length > 1 else '' %}
+                {% if tr2 == tr %}
+                <div class="figure-item">
+                  <img src="{{ fig.src }}" alt="{{ fig.caption }}" />
+                  <div class="muted small">{{ fig.caption }}</div>
+                </div>
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+          </div>
+        {% endfor %}
+      {% endif %}
+
+      {# Feature Importance #}
+      {% set ns = namespace(has=false) %}
+      {% for fig in figures %}
+        {% if 'importance' in fig.caption %}{% set ns.has = true %}{% endif %}
+      {% endfor %}
+      {% if ns.has %}
+        <h4>Feature Importance</h4>
+        {% set ns_traits = namespace(list=[]) %}
+        {% for fig in figures %}
+          {% if 'importance' in fig.caption %}
+            {% set after = fig.caption.split('importance.') %}
+            {% set tr = after[1].split('.')[0] if after|length > 1 else '' %}
+            {% if tr and tr not in ns_traits.list %}{% set _ = ns_traits.list.append(tr) %}{% endif %}
+          {% endif %}
+        {% endfor %}
+        {% for tr in ns_traits.list %}
+          <div class="tlabel">Trait: {{ tr }}</div>
+          <div class="figure-grid sm" style="margin-bottom:8px">
+            {% for fig in figures %}
+              {% if 'importance' in fig.caption %}
+                {% set after = fig.caption.split('importance.') %}
+                {% set tr2 = after[1].split('.')[0] if after|length > 1 else '' %}
+                {% if tr2 == tr %}
+                <div class="figure-item">
+                  <img src="{{ fig.src }}" alt="{{ fig.caption }}" />
+                  <div class="muted small">{{ fig.caption }}</div>
+                </div>
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+          </div>
+        {% endfor %}
+      {% endif %}
+
+      {# SHAP: Summary #}
+      {% set ns_sum = namespace(has=false) %}
+      {% for fig in figures %}
+        {% if 'shap_summary' in fig.caption %}{% set ns_sum.has = true %}{% endif %}
+      {% endfor %}
+      {% if ns_sum.has %}
+        <h4>SHAP Summary</h4>
+        {% set ns_traits = namespace(list=[]) %}
+        {% for fig in figures %}
+          {% if 'shap_summary' in fig.caption %}
+            {% set after = fig.caption.split('shap_summary.') %}
+            {% set tr = after[1].split('.')[0] if after|length > 1 else '' %}
+            {% if tr and tr not in ns_traits.list %}{% set _ = ns_traits.list.append(tr) %}{% endif %}
+          {% endif %}
+        {% endfor %}
+        {% for tr in ns_traits.list %}
+          <div class="tlabel">Trait: {{ tr }}</div>
+          <div class="figure-grid sm" style="margin-bottom:8px">
+            {% for fig in figures %}
+              {% if 'shap_summary' in fig.caption %}
+                {% set after = fig.caption.split('shap_summary.') %}
+                {% set tr2 = after[1].split('.')[0] if after|length > 1 else '' %}
+                {% if tr2 == tr %}
+                <div class="figure-item">
+                  <img src="{{ fig.src }}" alt="{{ fig.caption }}" />
+                  <div class="muted small">{{ fig.caption }}</div>
+                </div>
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+          </div>
+        {% endfor %}
+      {% endif %}
+
+      {# SHAP: Dependence #}
+      {% set ns_dep = namespace(has=false) %}
+      {% for fig in figures %}
+        {% if 'shap_dep' in fig.caption %}{% set ns_dep.has = true %}{% endif %}
+      {% endfor %}
+      {% if ns_dep.has %}
+        <h4>SHAP Dependence</h4>
+        {% set ns_traits = namespace(list=[]) %}
+        {% for fig in figures %}
+          {% if 'shap_dep' in fig.caption %}
+            {% set after = fig.caption.split('shap_dep.') %}
+            {% set tr = after[1].split('.')[0] if after|length > 1 else '' %}
+            {% if tr and tr not in ns_traits.list %}{% set _ = ns_traits.list.append(tr) %}{% endif %}
+          {% endif %}
+        {% endfor %}
+        {% for tr in ns_traits.list %}
+          <div class="tlabel">Trait: {{ tr }}</div>
+          <div class="figure-grid">
+            {% for fig in figures %}
+              {% if 'shap_dep' in fig.caption %}
+                {% set after = fig.caption.split('shap_dep.') %}
+                {% set tr2 = after[1].split('.')[0] if after|length > 1 else '' %}
+                {% if tr2 == tr %}
+                <div class="figure-item">
+                  <img src="{{ fig.src }}" alt="{{ fig.caption }}" />
+                  <div class="muted small">{{ fig.caption }}</div>
+                </div>
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+          </div>
+        {% endfor %}
+      {% endif %}
+
+    </section>
+    {% endif %}
+
+    
+
+    <!-- QC and configuration summary -->
+    {% if qc %}
+    <section class="card" style="margin-bottom:16px">
+      <h3>QC and Configuration Summary</h3>
+      <div class="kv">
+        <div class="muted">MAF min</div><div>{{ qc.maf_min }}</div>
+        <div class="muted">Max missing rate</div><div>{{ qc.max_missing }}</div>
+        <div class="muted">Variant selection</div><div>{{ qc.variant_selection }}</div>
+      </div>
+    </section>
+    {% endif %}
+  </main>
+  <footer>
+    Generated by QTLScan · {{ footer_note or 'All rights reserved.' }}
+  </footer>
+</body>
+</html>

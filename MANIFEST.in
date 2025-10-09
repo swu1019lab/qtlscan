@@ -1,0 +1,2 @@
+# Include non-Python resources in source distribution (sdist)
+recursive-include qtlscan *.html *.css *.js *.png *.svg *.ico

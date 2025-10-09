@@ -1,0 +1,14 @@
+# Core dependencies
+numpy>=1.21
+pandas>=1.5
+scikit-learn>=1.0
+matplotlib>=3.6
+pysam>=0.17.0
+scipy>=1.7
+jinja2>=3.0
+
+# Recommended model/explainability packages
+lightgbm>=4.0
+xgboost>=1.7
+shap>=0.43
+scikit-optimize>=0.9.0
