@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>QTLScan Report</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <style>
+        :root {
+            color-scheme: light;
+            font-family: "Segoe UI", "Source Sans Pro", "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.62;
+            --bg-color: #f6f7fb;
+            --card-bg: #ffffff;
+            --card-border: rgba(26, 44, 78, 0.08);
+            --text-muted: #566173;
+            --accent-primary: #1f4e79;
+            --accent-secondary: #d65f2e;
+            --chart-blue: #1f78b4;
+            --chart-orange: #ff7f0e;
+            --chart-green: #33a02c;
+            --chart-purple: #6a51a3;
+            --shadow-soft: 0 14px 32px rgba(22, 38, 74, 0.12);
+        }
+        body {
+            margin: 0;
+            padding: 0;
+            background: var(--bg-color);
+            color: #1a2333;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1240px;
+            margin: 0 auto;
+            padding: 32px clamp(16px, 4vw, 48px) 64px;
+        }
+        header {
+            border-radius: 4px;
+            padding: 32px;
+            background: #ffffff;
+            box-shadow: var(--shadow-soft);
+            position: relative;
+        }
+        header::before {
+            content: "";
+            position: absolute;
+            top: -6px;
+            left: -2px;
+            right: -2px;
+            height: 6px;
+            border-radius: 999px 999px 0 0;
+            background: linear-gradient(90deg, rgba(31, 78, 121, 0.85) 0%, rgba(147, 116, 169, 0.9) 55%, rgba(214, 95, 46, 0.85) 100%);
+            box-shadow: 0 4px 12px rgba(31, 78, 121, 0.18);
+        }
+        h1 {
+            margin: 0 0 12px 0;
+            font-size: clamp(32px, 4vw, 42px);
+            font-weight: 700;
+            color: #0f1c35;
+            text-align: center;
+        }
+        .meta {
+            color: var(--text-muted);
+            font-size: 15px;
+            text-align: center;
+        }
+        .summary-grid {
+            display: grid;
+            gap: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+            margin: 26px 0 36px;
+        }
+        .card {
+            border-radius: 4px;
+            padding: 20px 22px;
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            box-shadow: var(--shadow-soft);
+            position: relative;
+            overflow: hidden;
+            text-align: center;
+            border-left-width: 6px;
+            border-left-style: solid;
+            border-left-color: transparent;
+        }
+        .card--total { border-left-color: #1f4e79; }
+        .card--traits { border-left-color: #9374a9; }
+        .card--lead { border-left-color: #ba76a3; }
+        .card--pvalue { border-left-color: #538a95; }
+        .card--kb { border-left-color: #d65f2e; }
+        .card h3 {
+            margin-top: 0;
+            font-size: 17px;
+            color: #1f335a;
+            letter-spacing: 0.01em;
+            text-align: center;
+        }
+        .card .value {
+            font-size: clamp(26px, 3vw, 32px);
+            font-weight: 700;
+            color: var(--accent-primary);
+            letter-spacing: 0.03em;
+            text-align: center;
+        }
+        .section-title {
+            margin: 36px 0 16px;
+            font-size: 22px;
+            font-weight: 600;
+            color: #0f1b34;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .section-title::before {
+            content: "";
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--accent-primary);
+            box-shadow: 0 0 0 6px rgba(31, 78, 121, 0.18);
+        }
+        .charts {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 24px;
+            margin-bottom: 32px;
+        }
+        .charts--wide {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .charts--overview {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+        .charts--single {
+            grid-template-columns: 1fr;
+        }
+        .chart-card {
+            position: relative;
+        }
+        .chart {
+            height: 360px;
+            border-radius: 4px;
+            background: #ffffff;
+            box-shadow: var(--shadow-soft);
+            border: 1px solid rgba(26, 44, 78, 0.08);
+            padding: 14px;
+        }
+        .chart--full {
+            grid-column: 1 / -1;
+            height: 400px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 28px;
+            background: #ffffff;
+            border-radius: 4px;
+            overflow: hidden;
+            box-shadow: var(--shadow-soft);
+        }
+        th, td {
+            padding: 14px 18px;
+            text-align: left;
+            border-bottom: 1px solid rgba(203, 209, 224, 0.4);
+        }
+        th {
+            background: rgba(31, 78, 121, 0.12);
+            color: #16284a;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 13px;
+            letter-spacing: 0.04em;
+        }
+        tbody tr:hover {
+            background: rgba(31, 78, 121, 0.08);
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 999px;
+            background: #1f78b4;
+            color: #fff;
+            font-size: 12px;
+            letter-spacing: 0.02em;
+        }
+        footer {
+            margin-top: 48px;
+            padding: 26px 0 18px;
+            border-top: 1px solid rgba(168, 175, 202, 0.4);
+            font-size: 14px;
+            color: var(--text-muted);
+            text-align: center;
+        }
+        @media (max-width: 768px) {
+            header {
+                padding: 24px;
+            }
+            .charts,
+            .charts--wide {
+                grid-template-columns: 1fr;
+            }
+            .chart,
+            .chart--full {
+                height: 320px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>QTLScan Summary Report</h1>
+            <div class="meta">
+                Generated at {{ generated_at }}
+            </div>
+        </header>
+
+        <div class="summary-grid">
+            <div class="card card--total">
+                <h3>Total QTL Blocks</h3>
+                <div class="value">{{ summary.total_blocks }}</div>
+            </div>
+            <div class="card card--traits">
+                <h3>Unique Traits</h3>
+                <div class="value">{{ summary.total_traits }}</div>
+            </div>
+            <div class="card card--lead">
+                <h3>Lead SNPs</h3>
+                <div class="value">{{ summary.total_lead_snps }}</div>
+            </div>
+            <div class="card card--pvalue">
+                <h3>Total Genes</h3>
+                <div class="value">{{ summary.total_genes }}</div>
+            </div>
+            <div class="card card--kb">
+                <h3>Block size (median kb)</h3>
+                <div class="value">
+                    {% if summary.kb_summary.median is not none %}
+                        {{ "%.2f"|format(summary.kb_summary.median) }}
+                    {% else %}
+                        N/A
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <h2 class="section-title">Trait Statistics</h2>
+        <div class="charts charts--single">
+            <div class="chart-card" style="height: auto; padding: 20px; overflow-x: auto;">
+                <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+                    <thead>
+                        <tr style="border-bottom: 2px solid #eee; background: #f9f9f9;">
+                            <th style="padding: 10px; text-align: left;">Trait</th>
+                            <th style="padding: 10px; text-align: right;">QTL Count</th>
+                            <th style="padding: 10px; text-align: right;">Lead SNP Count</th>
+                            <th style="padding: 10px; text-align: right;">Gene Count</th>
+                            <th style="padding: 10px; text-align: right;">Min P-value</th>
+                        </tr>
+                    </thead>
+                    <tbody id="traitStatsBody"></tbody>
+                </table>
+                <div style="margin-top: 20px; display: flex; justify-content: space-between; align-items: center;">
+                    <div id="traitStatsPagination" style="display: flex; gap: 8px;"></div>
+                    <button id="exportTraitStatsBtn" style="padding: 6px 12px; background: #fff; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; font-size: 14px;">Export CSV</button>
+                </div>
+            </div>
+        </div>
+
+        <h2 class="section-title">Overview charts</h2>
+        <div class="charts charts--overview">
+            <div class="chart-card" id="traitChartCard">
+                <div id="traitChart" class="chart"></div>
+            </div>
+            <div class="chart-card" id="chromBarChartCard">
+                <div id="chromBarChart" class="chart"></div>
+            </div>
+            <div class="chart-card" id="nestedPieChartCard">
+                <div id="nestedPieChart" class="chart"></div>
+            </div>
+        </div>
+
+        <h2 class="section-title">Trait-level p-value distribution</h2>
+        <div class="charts charts--single">
+            <div class="chart-card" id="traitPvalueChartCard">
+                <div id="traitPvalueChart" class="chart chart--full"></div>
+            </div>
+        </div>
+
+        <h2 class="section-title">Block size distribution</h2>
+        <div class="charts charts--wide">
+            <div class="chart-card" id="sizeChartCard">
+                <div id="sizeChart" class="chart"></div>
+            </div>
+            <div class="chart-card" id="sizeBoxChartCard">
+                <div id="sizeBoxChart" class="chart"></div>
+            </div>
+        </div>
+
+        <h2 class="section-title">Top signals</h2>
+
+        <section>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Trait</th>
+                        <th>Lead SNP</th>
+                        <th>-log<sub>10</sub>(p)</th>
+                        <th>P-value</th>
+                        <th>Chromosome</th>
+                        <th>Position</th>
+                        <th>Block Size (kb)</th>
+                        <th>Gene Count</th>
+                        <th>Source</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in top_blocks %}
+                    <tr>
+                        <td><span class="badge">{{ row.trait }}</span></td>
+                        <td>{{ row.lead }}</td>
+                        <td>{% if row.neglog10 is not none %}{{ "%.2f"|format(row.neglog10) }}{% else %}N/A{% endif %}</td>
+                        <td>{% if row.pvalue is not none %}{{ "%.3e"|format(row.pvalue) }}{% else %}N/A{% endif %}</td>
+                        <td>{{ row.chr or "-" }}</td>
+                        <td>{% if row.position is not none %}{{ "%.0f"|format(row.position) }}{% else %}-{% endif %}</td>
+                        <td>{% if row.kb is not none %}{{ "%.2f"|format(row.kb) }}{% else %}-{% endif %}</td>
+                        <td>{{ row.gene_count if row.gene_count is not none else 0 }}</td>
+                        <td>{{ row.source_file or "" }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </section>
+
+        <footer>
+            Generated by QTLScan • Visualisation powered by Apache ECharts
+        </footer>
+    </div>
+
+    <script type="application/json" id="trait-data">{{ chart_data.traitCounts | safe }}</script>
+    <script type="application/json" id="chrom-data">{{ chart_data.chromCounts | safe }}</script>
+    <script type="application/json" id="trait-order-data">{{ chart_data.traitOrder | safe }}</script>
+    <script type="application/json" id="trait-pvalue-data">{{ chart_data.traitPvalue | safe }}</script>
+    <script type="application/json" id="kb-hist-data">{{ chart_data.kbHistogram | safe }}</script>
+    <script type="application/json" id="kb-trait-box-data">{{ chart_data.kbTraitBox | safe }}</script>
+    <script type="application/json" id="trait-stats-data">{{ chart_data.traitStats | safe }}</script>
+    <script>
+        const traitData = JSON.parse(document.getElementById('trait-data').textContent || '[]');
+        const chromData = JSON.parse(document.getElementById('chrom-data').textContent || '[]');
+        const traitOrderData = JSON.parse(document.getElementById('trait-order-data')?.textContent || '[]');
+        const traitPvalueData = JSON.parse(document.getElementById('trait-pvalue-data')?.textContent || '[]');
+        const sizeHistData = JSON.parse(document.getElementById('kb-hist-data').textContent || '[]');
+        const sizeTraitBoxData = JSON.parse(document.getElementById('kb-trait-box-data')?.textContent || '[]');
+        const traitStatsData = JSON.parse(document.getElementById('trait-stats-data')?.textContent || '[]');
+
+        // Trait Stats Table Logic
+        const traitStatsTableBody = document.getElementById('traitStatsBody');
+        const traitStatsPagination = document.getElementById('traitStatsPagination');
+        const exportTraitStatsBtn = document.getElementById('exportTraitStatsBtn');
+        
+        let currentStatsPage = 1;
+        const statsRowsPerPage = 10;
+        
+        function renderTraitStatsTable(page) {
+            if (!traitStatsTableBody) return;
+            traitStatsTableBody.innerHTML = '';
+            
+            const start = (page - 1) * statsRowsPerPage;
+            const end = start + statsRowsPerPage;
+            const pageData = traitStatsData.slice(start, end);
+            
+            pageData.forEach(row => {
+                const tr = document.createElement('tr');
+                tr.style.borderBottom = '1px solid #eee';
+                tr.innerHTML = `
+                    <td style="padding: 8px; text-align: left;">${row.trait}</td>
+                    <td style="padding: 8px; text-align: right;">${row.qtl_count}</td>
+                    <td style="padding: 8px; text-align: right;">${row.lead_snp_count}</td>
+                    <td style="padding: 8px; text-align: right;">${row.gene_count}</td>
+                    <td style="padding: 8px; text-align: right;">${row.min_pvalue != null ? Number(row.min_pvalue).toExponential(2) : 'N/A'}</td>
+                `;
+                traitStatsTableBody.appendChild(tr);
+            });
+            
+            renderStatsPagination(page);
+        }
+        
+        function renderStatsPagination(page) {
+            if (!traitStatsPagination) return;
+            traitStatsPagination.innerHTML = '';
+            
+            const totalPages = Math.ceil(traitStatsData.length / statsRowsPerPage);
+            if (totalPages <= 1) return;
+            
+            const createBtn = (text, targetPage, disabled = false) => {
+                const btn = document.createElement('button');
+                btn.textContent = text;
+                btn.style.padding = '5px 10px';
+                btn.style.cursor = disabled ? 'default' : 'pointer';
+                btn.style.border = '1px solid #ccc';
+                btn.style.background = '#fff';
+                btn.style.borderRadius = '4px';
+                if (disabled) {
+                    btn.style.opacity = '0.5';
+                } else {
+                    btn.onclick = () => {
+                        currentStatsPage = targetPage;
+                        renderTraitStatsTable(currentStatsPage);
+                    };
+                }
+                return btn;
+            };
+            
+            traitStatsPagination.appendChild(createBtn('Prev', page - 1, page === 1));
+            
+            const pageInfo = document.createElement('span');
+            pageInfo.textContent = `Page ${page} of ${totalPages}`;
+            pageInfo.style.alignSelf = 'center';
+            traitStatsPagination.appendChild(pageInfo);
+            
+            traitStatsPagination.appendChild(createBtn('Next', page + 1, page === totalPages));
+        }
+        
+        if (exportTraitStatsBtn) {
+            exportTraitStatsBtn.onclick = () => {
+                const headers = ['Trait', 'QTL Count', 'Lead SNP Count', 'Gene Count', 'Min P-value'];
+                const csvContent = [
+                    headers.join(','),
+                    ...traitStatsData.map(row => [
+                        `"${row.trait}"`,
+                        row.qtl_count,
+                        row.lead_snp_count,
+                        row.gene_count,
+                        row.min_pvalue
+                    ].join(','))
+                ].join('\n');
+                
+                const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                const link = document.createElement('a');
+                if (link.download !== undefined) {
+                    const url = URL.createObjectURL(blob);
+                    link.setAttribute('href', url);
+                    link.setAttribute('download', 'trait_statistics.csv');
+                    link.style.visibility = 'hidden';
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                }
+            };
+        }
+        
+        // Initial render
+        if (traitStatsData.length > 0) {
+            renderTraitStatsTable(currentStatsPage);
+        }
+
+        const rendererOptions = { renderer: 'svg' };
+        const EXPORT_BACKGROUND = '#ffffff';
+        const makeToolbox = (name) => ({
+            show: true,
+            right: 16,
+            top: 16,
+            feature: {
+                saveAsImage: {
+                    show: true,
+                    name,
+                    type: 'svg',
+                    backgroundColor: EXPORT_BACKGROUND,
+                }
+            }
+        });
+
+        const basePalette = ['#9374A9', '#9987AB', '#BA76A3', '#C69BB7', '#BA5F97', '#538A95', '#B8B0C3', '#D0E2DF'];
+
+        const traitChart = echarts.init(document.getElementById('traitChart'), null, rendererOptions);
+        traitChart.setOption({
+            tooltip: { trigger: 'axis' },
+            grid: { left: 50, right: 20, bottom: 70, top: 60 },
+            xAxis: {
+                type: 'category',
+                name: 'Trait',
+                nameLocation: 'middle',
+                nameGap: 50,
+                nameTextStyle: { color: '#000000', fontWeight: 600 },
+                data: traitData.map(item => item.name),
+                axisLabel: { rotate: 30, color: '#000000' },
+                axisLine: { lineStyle: { color: '#000000' } },
+                axisTick: { show: true }
+            },
+            yAxis: {
+                type: 'value',
+                name: 'QTL Blocks Count',
+                nameLocation: 'middle',
+                nameGap: 28,
+                nameTextStyle: { color: '#000000', fontWeight: 600 },
+                axisLabel: { color: '#000000' },
+                splitLine: { lineStyle: { type: 'dashed', color: 'rgba(17, 27, 52, 0.18)' } },
+                axisTick: { show: true },
+                axisLine: { show: true, lineStyle: { color: '#000000' } }
+            },
+            toolbox: makeToolbox('trait-chart'),
+            series: [{
+                type: 'bar',
+                data: traitData.map(item => item.value),
+                itemStyle: {
+                    color: basePalette[0]
+                }
+            }]
+        });
+
+        const chromChart = echarts.init(document.getElementById('chromBarChart'), null, rendererOptions);
+        chromChart.setOption({
+            tooltip: { trigger: 'axis' },
+            grid: { left: 50, right: 20, bottom: 70, top: 60 },
+            xAxis: {
+                type: 'category',
+                name: 'Chromosome',
+                nameLocation: 'middle',
+                nameGap: 50,
+                nameTextStyle: { color: '#000000', fontWeight: 600 },
+                data: chromData.map(item => item.name),
+                axisLabel: { rotate: 30, color: '#000000' },
+                axisLine: { lineStyle: { color: '#000000' } },
+                axisTick: { show: true }
+            },
+            yAxis: {
+                type: 'value',
+                name: 'QTL Blocks Count',
+                nameLocation: 'middle',
+                nameGap: 28,
+                nameTextStyle: { color: '#000000', fontWeight: 600 },
+                axisLabel: { color: '#000000' },
+                splitLine: { lineStyle: { type: 'dashed', color: 'rgba(17, 27, 52, 0.18)' } },
+                axisTick: { show: true },
+                axisLine: { show: true, lineStyle: { color: '#000000' } }
+            },
+            toolbox: makeToolbox('chromosome-chart'),
+            series: [{
+                type: 'bar',
+                data: chromData.map(item => item.value),
+                itemStyle: {
+                    color: basePalette[1]
+                }
+            }]
+        });
+
+        const nestedChart = echarts.init(document.getElementById('nestedPieChart'), null, rendererOptions);
+        nestedChart.setOption({
+            color: basePalette,
+            tooltip: { trigger: 'item' },
+            series: [
+                {
+                    name: 'Traits',
+                    type: 'pie',
+                    radius: [0, '42%'],
+                    itemStyle: {
+                        borderColor: '#f6f7fb',
+                        borderWidth: 2
+                    },
+                    label: {
+                        formatter: '{b}\n{c}'
+                    },
+                    labelLine: {
+                        length: 14
+                    },
+                    data: traitData.length ? traitData : [{ name: 'No trait info', value: 1 }]
+                },
+                {
+                    name: 'Chromosomes',
+                    type: 'pie',
+                    radius: ['55%', '78%'],
+                    itemStyle: {
+                        borderColor: '#f6f7fb',
+                        borderWidth: 2
+                    },
+                    label: {
+                        formatter: '{b}\n{c}'
+                    },
+                    data: chromData.length ? chromData : [{ name: 'No chromosome info', value: 1 }]
+                }
+            ],
+            toolbox: makeToolbox('trait-chromosome-composition')
+        });
+
+        const traitCategories = traitOrderData.length
+            ? traitOrderData
+            : Array.from(new Set(traitPvalueData.map(item => item.trait)));
+
+        const traitScatterContainer = document.getElementById('traitPvalueChart');
+        if (traitScatterContainer) {
+            const dynamicHeight = Math.max(320, Math.min(960, 220 + traitCategories.length * 32));
+            traitScatterContainer.style.height = `${dynamicHeight}px`;
+        }
+
+        const sizeChartContainer = document.getElementById('sizeChart');
+        if (sizeChartContainer) {
+            sizeChartContainer.style.height = '420px';
+        }
+        const sizeBoxChartContainer = document.getElementById('sizeBoxChart');
+        if (sizeBoxChartContainer) {
+            sizeBoxChartContainer.style.height = '420px';
+        }
+
+        const traitColorMap = traitCategories.reduce((acc, trait, idx) => {
+            acc[trait] = basePalette[idx % basePalette.length];
+            return acc;
+        }, {});
+
+        const traitScatterPoints = traitPvalueData.map(item => ({
+            value: [item.neglog10 ?? 0, item.trait],
+            trait: item.trait,
+            lead: item.lead,
+            kb: item.kb ?? 0,
+            pvalue: item.pvalue,
+            chr: item.chr,
+            position: item.position,
+            itemStyle: { color: traitColorMap[item.trait] || basePalette[0] }
+        }));
+
+        const traitPvalueChart = echarts.init(document.getElementById('traitPvalueChart'), null, rendererOptions);
+        traitPvalueChart.setOption({
+            title: {
+                text: 'Trait-wise -log10(p) distribution',
+                left: 'center',
+                textStyle: { color: '#000000', fontWeight: 600 }
+            },
+            tooltip: {
+                trigger: 'item',
+                formatter: params => {
+                    const d = params.data || {};
+                    const neglog = d.value?.[0] ?? 0;
+                    const kbVal = d.kb ?? 0;
+                    const lines = [
+                        `<strong>${d.trait ?? 'Trait'}</strong>`,
+                        d.lead ? `Lead SNP: ${d.lead}` : '',
+                        `-log10(p): ${neglog.toFixed(2)}`,
+                        `Block size: ${kbVal ? kbVal.toFixed(2) : 'N/A'} kb`,
+                        d.chr ? `Chromosome: ${d.chr}` : '',
+                        d.position ? `Position: ${d.position}` : '',
+                        typeof d.pvalue === 'number' ? `p-value: ${Number(d.pvalue).toExponential(2)}` : ''
+                    ];
+                    return lines.filter(Boolean).join('<br/>');
+                }
+            },
+            grid: { left: 120, right: 40, bottom: 60, top: 60 },
+            xAxis: {
+                name: '-log10(p)',
+                type: 'value',
+                nameLocation: 'middle',
+                nameGap: 45,
+                nameTextStyle: { color: '#000000', fontWeight: 600 },
+                splitLine: { lineStyle: { type: 'dashed', color: 'rgba(17, 27, 52, 0.18)' } },
+                axisLabel: { color: '#000000' },
+                axisTick: { show: true },
+                axisLine: { show: true, lineStyle: { color: 'rgba(17, 27, 52, 0.45)' } }
+            },
+            yAxis: {
+                type: 'category',
+                name: 'Trait',
+                data: traitCategories,
+                nameLocation: 'middle',
+                nameGap: 80,
+                nameTextStyle: { color: '#000000', fontWeight: 600 },
+                axisLabel: { color: '#000000' },
+                axisLine: { show: true, lineStyle: { color: 'rgba(17, 27, 52, 0.45)' } },
+                axisTick: { show: true },
+                splitLine: { show: true, lineStyle: { type: 'dashed', color: 'rgba(17, 27, 52, 0.1)' } }
+            },
+            series: [{
+                type: 'scatter',
+                symbolSize: (value, params) => {
+                    const kbVal = params.data?.kb ?? 0;
+                    return Math.min(22, Math.max(6, (kbVal || 0) * 1.4));
+                },
+                data: traitScatterPoints,
+                emphasis: { focus: 'self' }
+            }],
+            toolbox: makeToolbox('trait-pvalue-scatter')
+        });
+
+    const sizeChart = echarts.init(document.getElementById('sizeChart'), null, rendererOptions);
+        sizeChart.setOption({
+            tooltip: { trigger: 'axis' },
+            grid: { left: 50, right: 20, bottom: 80, top: 60 },
+            xAxis: {
+                type: 'category',
+                name: 'Block size bin (kb)',
+                nameLocation: 'middle',
+                nameGap: 68,
+                nameTextStyle: { color: '#000000', fontWeight: 600 },
+                data: sizeHistData.map(item => item.range),
+                axisLabel: { rotate: 35, color: '#000000', margin: 16, interval: 0 },
+                axisLine: { lineStyle: { color: '#000000' } },
+                axisTick: { show: true }
+            },
+            yAxis: {
+                type: 'value',
+                name: 'Count',
+                nameLocation: 'middle',
+                nameGap: 30,
+                nameTextStyle: { color: '#000000', fontWeight: 600 },
+                axisLabel: { color: '#000000' },
+                splitLine: { lineStyle: { type: 'dashed', color: 'rgba(17, 27, 52, 0.18)' } },
+                axisTick: { show: true },
+                axisLine: { show: true, lineStyle: { color: '#000000' } }
+            },
+            toolbox: makeToolbox('block-size-histogram'),
+            series: [{
+                type: 'bar',
+                data: sizeHistData.map(item => item.count),
+                itemStyle: {
+                    color: basePalette[2]
+                }
+            }]
+        });
+
+    const sizeBoxChart = echarts.init(document.getElementById('sizeBoxChart'), null, rendererOptions);
+        const traitBoxEntries = sizeTraitBoxData
+            .map(item => ({
+                trait: item?.trait,
+                stats: Array.isArray(item?.stats)
+                    ? item.stats.map(value => (value === null || value === undefined) ? null : Number(value))
+                    : []
+            }))
+            .filter(entry => entry.trait && entry.stats.length === 5 && entry.stats.every(value => value !== null && !Number.isNaN(value)));
+        const traitBoxCategories = traitBoxEntries.map(entry => entry.trait);
+        const boxplotDatasetSource = [
+            ['Trait', 'min', 'Q1', 'median', 'Q3', 'max'],
+            ...traitBoxEntries.map(entry => [
+                entry.trait,
+                ...entry.stats.map(value => Number(value))
+            ])
+        ];
+        const hasTraitBoxData = boxplotDatasetSource.length > 1;
+        const boxplotDatasetId = 'trait-box-dataset';
+        const sizeBoxOptions = {
+            tooltip: {
+                trigger: 'item',
+                confine: true,
+                formatter: params => {
+                    const rawData = params?.data ?? [];
+                    const dimensionNames = params?.dimensionNames || [];
+                    const valueArray = Array.isArray(params?.value) ? params.value : [];
+                    const traitName =
+                        (rawData && typeof rawData === 'object' && !Array.isArray(rawData) && typeof rawData.Trait === 'string')
+                            ? rawData.Trait
+                            : Array.isArray(rawData)
+                                ? rawData[0]
+                                : params?.name || 'Trait';
+                    const quantileKeys = ['min', 'Q1', 'median', 'Q3', 'max'];
+                    const extractValue = (key, fallbackIndex) => {
+                        if (rawData && typeof rawData === 'object' && !Array.isArray(rawData) && key in rawData) {
+                            const val = rawData[key];
+                            return typeof val === 'number' ? val : Number(val);
+                        }
+                        const dimIndex = dimensionNames.indexOf(key);
+                        if (Array.isArray(rawData) && dimIndex >= 0 && dimIndex < rawData.length) {
+                            const val = rawData[dimIndex];
+                            return typeof val === 'number' ? val : Number(val);
+                        }
+                        if (dimIndex >= 0 && dimIndex < valueArray.length) {
+                            const val = valueArray[dimIndex];
+                            return typeof val === 'number' ? val : Number(val);
+                        }
+                        if (Array.isArray(rawData) && fallbackIndex < rawData.length) {
+                            const val = rawData[fallbackIndex];
+                            return typeof val === 'number' ? val : Number(val);
+                        }
+                        if (fallbackIndex < valueArray.length) {
+                            const val = valueArray[fallbackIndex];
+                            return typeof val === 'number' ? val : Number(val);
+                        }
+                        return null;
+                    };
+                    const quantileValues = quantileKeys.map((key, idx) => extractValue(key, idx + 1));
+                    if (quantileValues.some(value => value === null || !Number.isFinite(value))) {
+                        return `${traitName}: No data`;
+                    }
+                    const [min, q1, median, q3, max] = quantileValues;
+                    return [
+                        `<strong>${traitName}</strong>`,
+                        `min: ${min.toFixed(2)} kb`,
+                        `Q1: ${q1.toFixed(2)} kb`,
+                        `median: ${median.toFixed(2)} kb`,
+                        `Q3: ${q3.toFixed(2)} kb`,
+                        `max: ${max.toFixed(2)} kb`
+                    ].join('<br/>');
+                }
+            },
+            grid: { left: 50, right: 30, bottom: 80, top: 60 },
+            xAxis: {
+                type: 'category',
+                name: 'Trait',
+                nameLocation: 'middle',
+                nameGap: 68,
+                nameTextStyle: { color: '#000000', fontWeight: 600 },
+                data: hasTraitBoxData ? traitBoxCategories : [],
+                axisLabel: { color: '#000000', rotate: 30, margin: 16, interval: 0 },
+                axisTick: { show: true },
+                axisLine: { lineStyle: { color: '#000000' } }
+            },
+            yAxis: {
+                type: 'value',
+                name: 'Size',
+                nameLocation: 'middle',
+                nameGap: 30,
+                nameTextStyle: { color: '#000000', fontWeight: 600 },
+                axisLabel: { color: '#000000' },
+                axisTick: { show: true },
+                axisLine: { show: true, lineStyle: { color: '#000000' } },
+                splitLine: { lineStyle: { type: 'dashed', color: 'rgba(17, 27, 52, 0.18)' } }
+            },
+            series: [{
+                type: 'boxplot',
+                itemStyle: {
+                    color: 'rgba(147, 116, 169, 0.32)',
+                    borderColor: '#9374A9'
+                }
+            }],
+            toolbox: makeToolbox('block-size-trait-boxplot')
+        };
+        if (hasTraitBoxData) {
+            sizeBoxOptions.dataset = [{
+                id: boxplotDatasetId,
+                source: boxplotDatasetSource
+            }];
+            sizeBoxOptions.series[0].datasetId = boxplotDatasetId;
+            sizeBoxOptions.series[0].encode = {
+                x: 'Trait',
+                y: ['min', 'Q1', 'median', 'Q3', 'max'],
+                itemName: 'Trait',
+                tooltip: ['min', 'Q1', 'median', 'Q3', 'max']
+            };
+        } else {
+            sizeBoxOptions.series[0].data = [];
+        }
+        sizeBoxChart.setOption(sizeBoxOptions);
+
+        window.addEventListener('resize', () => {
+            traitChart.resize();
+            chromChart.resize();
+            nestedChart.resize();
+            traitPvalueChart.resize();
+            sizeChart.resize();
+            sizeBoxChart.resize();
+        });
+    </script>
+</body>
+</html>

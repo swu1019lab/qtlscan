@@ -1,51 +1,120 @@
-from qtlscan.qtl import QTL, QTLNetwork
+from qtlscan.qtl import QTL, QTLNetwork, QTLReport
 from qtlscan.viz import Visualizer
 from qtlscan.log import logger
-from qtlscan.igs import train as train_impl
-from qtlscan.igs import predict as predict_impl
 from qtlscan.phe import phe_split, phe_merge, phe_stat
 
 import argparse
 import os
+from pathlib import Path
 from multiprocessing import cpu_count
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-import random
+import re
 from typing import List, Tuple, Dict, Optional
 
 
 def run_scan(args):
-    """Process GWAS subcommand."""
+    """Process scan subcommand."""
+
+    def load_trait_names(names_arg: str) -> List[str]:
+        if not names_arg:
+            raise ValueError("--names is required to label traits.")
+        candidate = os.path.expanduser(names_arg)
+        names: List[str]
+        if os.path.isfile(candidate):
+            with open(candidate, "r", encoding="utf-8") as handle:
+                names = [line.strip() for line in handle if line.strip()]
+        else:
+            names = [part.strip() for part in names_arg.split(",") if part.strip()]
+        if not names:
+            raise ValueError("No valid trait names found in --names argument.")
+        return names
+
+    def count_phe_traits(phe_path: str) -> int:
+        try:
+            phe_df = pd.read_csv(phe_path, sep="\t", header=None)
+        except Exception as exc:
+            raise ValueError(f"Unable to read phenotype file '{phe_path}' to infer trait count.") from exc
+        trait_count = phe_df.shape[1] - 2
+        if trait_count < 1:
+            raise ValueError("Phenotype file must contain at least one trait column after the sample identifiers.")
+        return trait_count
+
+    def make_safe_name(name: str, counters: Dict[str, int]) -> str:
+        safe = re.sub(r"[^\w.-]+", "_", name.strip())
+        if not safe:
+            safe = "trait"
+        occurrence = counters.get(safe, 0)
+        counters[safe] = occurrence + 1
+        if occurrence:
+            safe = f"{safe}_{occurrence}"
+        return safe
+
+    trait_names = load_trait_names(args.names)
+
+    # Determine P-value thresholds (one or two values allowed)
+    if not args.pvalue or len(args.pvalue) > 2:
+        raise ValueError("--pvalue accepts one or two floating-point thresholds.")
+    if len(args.pvalue) == 1:
+        block_pvalue = gwas_pvalue = float(args.pvalue[0])
+        logger.info(
+            "Using P-value threshold %.3g for both GWAS filtering and block evaluation.",
+            gwas_pvalue,
+        )
+    else:
+        low, high = sorted(float(v) for v in args.pvalue)
+        block_pvalue = low
+        gwas_pvalue = high
+        logger.info(
+            "Using layered P-value thresholds: %.3g for GWAS filtering, %.3g for block evaluation.",
+            gwas_pvalue,
+            block_pvalue,
+        )
 
     logger.info("Initializing QTL analysis...")
     qtl = QTL()
     qtl.check_plink()
 
-    # If --phe is provided, run GEMMA to generate GWAS summary files
+    ann_data: Optional[pd.DataFrame] = None
+
     if args.phe:
+        inferred_traits = count_phe_traits(args.phe)
+        if len(trait_names) != inferred_traits:
+            raise ValueError(
+                f"--names count ({len(trait_names)}) must match the number of phenotypes in --phe ({inferred_traits})."
+            )
         logger.info("Phenotype file provided. Running GEMMA to generate GWAS summary statistics...")
-        summary_files = qtl.run_gemma(args.vcf, args.phe, args.out_dir, args.out_name)
+        summary_files = list(qtl.run_gemma(args.vcf, args.phe, args.out_dir, args.out_name))
     else:
-        # If --summary is provided, use the summary file
-        summary_files = args.summary
+        summary_files = list(args.summary)
+        if len(trait_names) != len(summary_files):
+            raise ValueError(
+                f"--names count ({len(trait_names)}) must match the number of summary files provided ({len(summary_files)})."
+            )
+
+    safe_trait_names: List[str] = []
+    counters: Dict[str, int] = {}
+    for trait in trait_names:
+        safe_trait_names.append(make_safe_name(trait, counters))
+
+    logger.info("Trait naming order: %s", ", ".join(trait_names))
 
     # Load GFF file (if provided)
     if args.gff:
         ann_data = qtl.read_gff(args.gff, main_type=args.main_type, attr_id=args.attr_id, extract_gene=True)
 
     # Process each summary file
-    for i, summary_file in enumerate(summary_files):
-        logger.info(f"Processing GWAS summary file: {summary_file}")
+    for summary_file, trait_label, safe_name in zip(summary_files, trait_names, safe_trait_names):
+        logger.info(f"Processing GWAS summary file: {summary_file} (trait: {trait_label})")
 
         # Set output name based on the summary file name
-        base_name = os.path.splitext(os.path.basename(summary_file))[0]
-        out_name = f"{args.out_name}_{i}_{base_name}"
+        base_name = safe_name or os.path.splitext(os.path.basename(summary_file))[0]
 
         # Load GWAS summary statistics
-        gwas_data = qtl.read_gwas(summary_file, pvalue_threshold=args.pvalue)
+        gwas_data = qtl.read_gwas(summary_file, pvalue_threshold=gwas_pvalue)
 
         # Process GWAS data
         qtl_blocks = qtl.process_gwas(
@@ -57,55 +126,223 @@ def run_scan(args):
             ld_window_kb=args.ld_window_kb,
             min_snps=args.min_snps,
             threads=args.threads,
-            out_dir=args.out_dir
+            out_dir=args.out_dir,
+            block_pvalue=block_pvalue,
         )
 
+        qtl_blocks = qtl_blocks.copy()
+        qtl_blocks.insert(0, "trait", trait_label)
+
         # Save QTL blocks for each summary file
-        qtl.save(qtl_blocks, out_dir=args.out_dir, out_name=str(out_name))
+        qtl.save(qtl_blocks, out_dir=args.out_dir, out_name=str(base_name))
 
     logger.info("Done!")
 
-def run_qtlnetwork(args):
+
+def run_gwas(args):
+    """Run GWAS workflows using GEMMA or EMMAX."""
+
+    logger.info("Initializing GWAS analysis...")
+    qtl = QTL()
+
+    method = (args.method or "gemma").lower()
+    if method == "gemma":
+        runner = qtl.run_gemma
+    elif method == "emmax":
+        runner = qtl.run_emmax
+    else:
+        raise ValueError("--method must be either 'gemma' or 'emmax'.")
+
+    summary_files = runner(args.vcf, args.phe, args.out_dir, args.out_name)
+
+    if not summary_files:
+        logger.warning("No summary files were produced by the GWAS run.")
+    else:
+        logger.info("Generated GWAS summary files:")
+        for path in summary_files:
+            logger.info("  %s", path)
+
+    logger.info("GWAS analysis completed!")
+
+def run_network(args):
     logger.info("Initializing QTL network analysis...")
     qtl_network = QTLNetwork()
 
-    # Parameters required: qtl, vcf
-    if args.qtl is None or args.vcf is None:
-        raise ValueError("--qtl and --vcf are required for plotting QTL network")
-    # Load QTL blocks if provided
-    qtl_network.load_data(args.qtl, args.names)
-    qtl_network.process_data(args.vcf, args.min_weight)
-    # Create figure
+    def load_trait_color_map(file_path: str) -> Tuple[Dict[str, str], str]:
+        expanded_path = os.path.expanduser(file_path)
+        if not os.path.isfile(expanded_path):
+            raise FileNotFoundError(f"Trait color mapping file not found: {expanded_path}")
+
+        mapping: Dict[str, str] = {}
+        with open(expanded_path, "r", encoding="utf-8") as handle:
+            for idx, raw_line in enumerate(handle, 1):
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = re.split(r"[,\s]+", line)
+                if len(parts) < 2:
+                    raise ValueError(
+                        f"Invalid trait color mapping at line {idx}: '{raw_line.strip()}'"
+                    )
+                trait, color = parts[0], parts[1]
+                mapping[trait] = color
+
+        if not mapping:
+            raise ValueError("Trait color mapping file is empty or contains no valid entries.")
+
+        return mapping, expanded_path
+
+    # Handle input mode
+    if args.edge:
+        logger.info(f"Loading existing edge data from {args.edge}...")
+        qtl_network.load_edge_data(args.edge)
+    else:
+        if args.qtl is None or args.vcf is None:
+            raise ValueError("--qtl and --vcf are required when --edge is not provided.")
+        # Load QTL blocks if provided
+        qtl_network.load_data(args.qtl, args.names)
+        qtl_network.process_data(args.vcf, args.min_weight, out_dir=args.out_dir, out_name=args.out_name)
+
+    color_map = None
+    if getattr(args, "trait_colors", None):
+        color_map, mapping_path = load_trait_color_map(args.trait_colors)
+        
+        if qtl_network.blocks is not None:
+            dataset_traits = {str(trait) for trait in qtl_network.blocks["trait"].unique()}
+        elif qtl_network.edge_df is not None:
+            t1 = set(qtl_network.edge_df['trait1'].unique())
+            t2 = set(qtl_network.edge_df['trait2'].unique())
+            dataset_traits = {str(t) for t in t1.union(t2) if pd.notna(t)}
+        else:
+            dataset_traits = set()
+
+        missing_traits = sorted(dataset_traits - set(color_map.keys()))
+        if missing_traits:
+            raise ValueError(
+                "Trait color mapping file is missing entries for the following trait(s): "
+                + ", ".join(missing_traits)
+            )
+        logger.info(
+            "Loaded %d custom trait color(s) from %s",
+            len(color_map),
+            mapping_path,
+        )
+    # Create figure with 2 rows:
+    # Row 1: 4 small degree-related plots (rank, histogram, ntraits, pvalue)
+    # Row 2: full-width network plot
     fig = plt.figure(figsize=(args.width, args.height))
-    spec = fig.add_gridspec(4, 2)
-    ax1 = fig.add_subplot(spec[0, 0])
-    ax2 = fig.add_subplot(spec[0, 1])
-    ax3 = fig.add_subplot(spec[1:, :])
-    qtl_network.plot(layout=args.layout, 
-                    k=args.k, seed=args.seed,
-                    node_size_factor=args.node_size_factor, 
-                    edge_width_factor=args.edge_width_factor,
-                    with_labels=args.with_labels, 
-                    export_csv=os.path.join(args.out_dir, f"{args.out_name}.degree.csv"),
-                    ax1=ax1, ax2=ax2, ax3=ax3)
+    spec = fig.add_gridspec(2, 4, height_ratios=[1, 3])
+    ax_rank = fig.add_subplot(spec[0, 0])
+    ax_hist = fig.add_subplot(spec[0, 1])
+    ax_ntraits = fig.add_subplot(spec[0, 2])
+    ax_pvalue = fig.add_subplot(spec[0, 3])
+    ax_network = fig.add_subplot(spec[1, :])
+    
+    nodes_style = {
+        "alpha": args.node_alpha,
+        "linewidths": args.node_linewidths
+    }
+    edges_style = {
+        "alpha": args.edge_alpha,
+        "edge_color": args.edge_color,
+        "style": args.edge_style,
+        "arrows": args.edge_arrows,
+        "arrowsize": args.edge_arrowsize,
+        "connectionstyle": args.edge_connectionstyle
+    }
+    labels_style = {
+        "font_size": args.node_labels_size,
+        "font_color": args.node_labels_color,
+        "font_weight": args.label_font_weight,
+        "font_family": args.label_font_family
+    }
+
+    _, _, node_metrics, cluster_data = qtl_network.plot(layout=args.layout,
+                     k=args.k, seed=args.seed,
+                     node_size_factor=args.node_size_factor,
+                     edge_width_factor=args.edge_width_factor,
+                     with_labels=args.with_labels,
+                     color_map=color_map,
+                     nodes_style=nodes_style,
+                     edges_style=edges_style,
+                     labels_style=labels_style,
+                     ax_rank=ax_rank, ax_hist=ax_hist, ax_ntraits=ax_ntraits, ax_pvalue=ax_pvalue, ax_network=ax_network)
+
+    # Save degree metrics
+    if node_metrics is not None:
+        degree_path = os.path.join(args.out_dir, f"{args.out_name}.degree.csv")
+        node_metrics.to_csv(degree_path, index=False)
+        logger.info(f"Degree metrics saved to {degree_path}")
+
+    # Save cluster data
+    if cluster_data:
+        cluster_path = os.path.join(args.out_dir, f"{args.out_name}.cluster.csv")
+        pd.DataFrame(cluster_data).to_csv(cluster_path, index=False)
+        logger.info(f"Cluster layout data saved to {cluster_path}")
     plt.tight_layout()
     plt.savefig(os.path.join(args.out_dir, f"{args.out_name}.{args.format}"), dpi=300, bbox_inches="tight")
     plt.close()
 
-    qtl_network.save(out_dir=args.out_dir, out_name=str(args.out_name))
+    if not args.edge:
+        qtl_network.save(out_dir=args.out_dir, out_name=str(args.out_name))
     logger.info("Done!")
 
-def run_train(args):
-    """Train genotype-to-phenotype model(s) and generate report."""
-    logger.info("Starting train subcommand...")
-    train_impl(args)
-    logger.info("Training pipeline completed!")
+def run_report(args):
+    logger.info("Initializing QTL report generation...")
+    report = QTLReport()
 
-def run_predict(args):
-    """Apply a trained model bundle to new feature table for inference-only."""
-    logger.info("Starting predict subcommand...")
-    predict_impl(args)
-    logger.info("Prediction completed!")
+    def parse_names(raw: Optional[str]) -> Optional[List[str]]:
+        if raw is None:
+            return None
+        candidate = raw.strip()
+        if not candidate:
+            return None
+        if os.path.isfile(candidate):
+            with open(candidate, "r", encoding="utf-8") as reader:
+                names = [line.strip() for line in reader if line.strip()]
+        else:
+            names = [item.strip() for item in candidate.split(",") if item.strip()]
+        if not names:
+            return None
+        return names
+
+    def collect_block_files() -> List[str]:
+        if args.qtl:
+            return [os.path.expanduser(path) for path in args.qtl]
+        if not args.qtl_dir:
+            raise ValueError("Either --qtl or --qtl_dir must be provided.")
+        root = Path(os.path.expanduser(args.qtl_dir)).resolve()
+        if not root.exists():
+            raise FileNotFoundError(f"Directory not found: {root}")
+        if not root.is_dir():
+            raise ValueError(f"--qtl_dir must point to a directory: {root}")
+        block_paths = sorted(
+            str(path.resolve())
+            for path in root.rglob("*.blocks.csv")
+            if path.is_file()
+        )
+        if not block_paths:
+            raise ValueError(f"No *.blocks.csv files found in directory: {root}")
+        logger.info("Discovered %d block file(s) under %s", len(block_paths), root)
+        return block_paths
+
+    block_files = collect_block_files()
+
+    block_names = parse_names(args.names)
+    if block_names and len(block_names) != len(block_files):
+        raise ValueError(
+            "The number of names provided must match the number of QTL block files."
+        )
+
+    output_path = report.render(
+        blocks_files=block_files,
+        out_dir=args.out_dir,
+        out_name=args.out_name,
+        blocks_names=block_names,
+        top_n=args.top_n,
+    )
+    logger.info("Report saved to %s", output_path)
+    logger.info("Done!")
 
 def plot_manhattan(args):
     """Manhattan plot"""
@@ -133,415 +370,6 @@ def plot_manhattan(args):
     plt.tight_layout()
     plt.savefig(os.path.join(args.out_dir, f"{args.out_name}.{args.format}"), dpi=300, bbox_inches="tight")
     plt.close()
-
-    logger.info("Plotting completed!")
-
-def plot_genotype(args):
-    """Genotype heatmap and stats from VCF"""
-    import importlib
-    try:
-        pysam = importlib.import_module('pysam')
-    except Exception as e:
-        raise RuntimeError("pysam 未安装或不可用；该子命令需要 pysam 来读取 VCF。请安装 pysam 后重试。") from e
-
-    logger.info("Starting genotype plot subcommand...")
-    # Validate inputs
-    if args.vcf is None:
-        raise ValueError("--vcf is required for plotting genotype heatmap")
-
-    vcf_path = args.vcf
-    if not os.path.isfile(vcf_path):
-        raise ValueError(f"VCF not found: {vcf_path}")
-
-    # Figure format
-    image_format = (args.format or "png").lower()
-    if image_format not in {"png", "pdf", "svg"}:
-        raise ValueError("--format only supports png/pdf/svg")
-
-    # ----- Helper functions (borrowed and adapted from stat_vcf, self-contained) -----
-    def get_sample_names(vcf_path: str) -> List[str]:
-        with pysam.VariantFile(vcf_path) as vf:
-            return list(vf.header.samples)
-
-    def parse_regions(region_args: Optional[List[str]]) -> Optional[Dict[str, List[Tuple[int, int]]]]:
-        if not region_args:
-            return None
-        regions: Dict[str, List[Tuple[int, int]]] = {}
-        for item in region_args:
-            s = item.strip()
-            if ":" not in s:
-                chrom = s
-                start, end = 1, 2**31 - 1
-            else:
-                chrom, span = s.split(":", 1)
-                if "-" in span:
-                    a, b = span.split("-", 1)
-                    start = int(a) if a else 1
-                    end = int(b) if b else 2**31 - 1
-                else:
-                    start = int(span)
-                    end = start
-            regions.setdefault(chrom, []).append((start, end))
-        # merge
-        for chrom in list(regions.keys()):
-            ivals = sorted(regions[chrom])
-            merged = []
-            for s, e in ivals:
-                if not merged or s > merged[-1][1] + 1:
-                    merged.append([s, e])
-                else:
-                    merged[-1][1] = max(merged[-1][1], e)
-            regions[chrom] = [(s, e) for s, e in merged]
-        return regions
-
-    def parse_regions_file(path: Optional[str]) -> Optional[Dict[str, List[Tuple[int, int]]]]:
-        if not path:
-            return None
-        regions: Dict[str, List[Tuple[int, int]]] = {}
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                s = line.strip()
-                if not s or s.startswith("#"):
-                    continue
-                parts = s.split()
-                if len(parts) < 3:
-                    continue
-                chrom = parts[0]
-                try:
-                    start0 = int(parts[1])
-                    end1 = int(parts[2])
-                except ValueError:
-                    continue
-                start = start0 + 1
-                end = end1
-                if start > end:
-                    continue
-                regions.setdefault(chrom, []).append((start, end))
-        for chrom in list(regions.keys()):
-            ivals = sorted(regions[chrom])
-            merged: List[Tuple[int, int]] = []
-            for s, e in ivals:
-                if not merged or s > merged[-1][1] + 1:
-                    merged.append([s, e])
-                else:
-                    merged[-1][1] = max(merged[-1][1], e)
-            regions[chrom] = [(s, e) for s, e in merged]
-        return regions
-
-    def is_indel_site(ref: str, alts: Optional[Tuple[str, ...]]) -> Optional[bool]:
-        if not alts:
-            return None
-        for a in alts:
-            if a == "*" or a.startswith("<"):
-                return True
-        if any(len(a) != len(ref) for a in alts):
-            return True
-        if len(ref) == 1 and all(len(a) == 1 for a in alts):
-            return False
-        return True
-
-    def encode_gt(gt: Optional[object]) -> Tuple[int, bool]:
-        if gt is None:
-            return -1, False
-        if isinstance(gt, (tuple, list)):
-            if any(a is None for a in gt):
-                return -1, False
-            alle = [str(a) for a in gt]
-        else:
-            s = str(gt)
-            if "." in s:
-                return -1, False
-            alle = s.replace("|", "/").split("/")
-        if len(alle) == 0:
-            return -1, False
-        nonref = any(a != "0" for a in alle)
-        if all(a == "0" for a in alle):
-            return 0, False
-        if len(set(alle)) == 1 and alle[0] != "0":
-            return 2, True
-        return 1, True
-
-    def in_regions(chrom: str, pos: int, regions: Optional[Dict[str, List[Tuple[int, int]]]]) -> bool:
-        if regions is None:
-            return True
-        if chrom not in regions:
-            return False
-        for s, e in regions[chrom]:
-            if s <= pos <= e:
-                return True
-        return False
-
-    def iterate_records(vcf_path: str, regions: Optional[Dict[str, List[Tuple[int, int]]]]):
-        vf = pysam.VariantFile(vcf_path)
-        if not regions:
-            for rec in vf:
-                yield rec
-            return
-        try:
-            for chrom, ivals in regions.items():
-                for s, e in ivals:
-                    start0 = max(0, s - 1)
-                    for rec in vf.fetch(chrom, start0, e):
-                        yield rec
-        except (ValueError, OSError):
-            vf.close()
-            with pysam.VariantFile(vcf_path) as vf2:
-                for rec in vf2:
-                    if in_regions(rec.chrom, rec.pos, regions):
-                        yield rec
-
-    def reservoir_pick_variant_indices(vcf_path: str, regions: Optional[Dict[str, List[Tuple[int, int]]]], k: int, seed: int) -> List[int]:
-        rnd = random.Random(seed)
-        picked: List[int] = []
-        seen = 0
-        for _rec in iterate_records(vcf_path, regions):
-            if seen < k:
-                picked.append(seen)
-            else:
-                j = rnd.randrange(seen + 1)
-                if j < k:
-                    picked[j] = seen
-            seen += 1
-        return sorted(picked)
-
-    def select_samples(all_samples: List[str], names: Optional[List[str]], name_file: Optional[str], random_n: Optional[int], seed: int) -> Tuple[List[str], List[int]]:
-        target_names: List[str] = []
-        if names:
-            for n in names:
-                n2 = n.strip()
-                if n2:
-                    target_names.append(n2)
-        if name_file:
-            with open(name_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    s = line.strip()
-                    if s:
-                        target_names.append(s)
-        if target_names:
-            name2idx = {n: i for i, n in enumerate(all_samples)}
-            missing = [n for n in target_names if n not in name2idx]
-            if missing:
-                raise RuntimeError(f"Samples not found: {','.join(missing)}")
-            idxs = [name2idx[n] for n in target_names]
-            return [all_samples[i] for i in idxs], idxs
-        if random_n is not None:
-            if random_n <= 0:
-                raise RuntimeError("--random-samples must be >0")
-            if random_n > len(all_samples):
-                raise RuntimeError("Random sample count exceeds available samples in VCF")
-            rnd = random.Random(seed)
-            idxs = sorted(rnd.sample(range(len(all_samples)), random_n))
-            return [all_samples[i] for i in idxs], idxs
-        idxs = list(range(len(all_samples)))
-        return all_samples[:], idxs
-
-    def parse_groups_file(path: Optional[str], selected_names: List[str]) -> Dict[str, str]:
-        if not path:
-            return {}
-        mp: Dict[str, str] = {}
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                s = line.strip()
-                if not s or s.startswith("#"):
-                    continue
-                parts = s.replace(",", " ").split()
-                if len(parts) < 2:
-                    continue
-                sample, group = parts[0], parts[1]
-                mp[sample] = group
-        return {s: mp.get(s, "Ungrouped") for s in selected_names}
-
-    def make_random_groups(selected_names: List[str], k: int, seed: int) -> Dict[str, str]:
-        k = max(1, min(k, len(selected_names)))
-        rnd = random.Random(seed)
-        arr = selected_names[:]
-        rnd.shuffle(arr)
-        n = len(arr)
-        base = n // k
-        extra = n % k
-        mp: Dict[str, str] = {}
-        idx = 0
-        for i in range(k):
-            sz = base + (1 if i < extra else 0)
-            gname = f"G{i+1}"
-            for _ in range(sz):
-                mp[arr[idx]] = gname
-                idx += 1
-        return mp
-
-    # ----- Prepare inputs -----
-    all_samples = get_sample_names(vcf_path)
-    samples_arg = [s for s in args.samples.split(",")] if args.samples else None
-    selected_names, _selected_idx = select_samples(
-        all_samples, samples_arg, args.samples_file, args.random_samples, args.seed
-    )
-    logger.info(f"Selected {len(selected_names)} samples for plotting")
-
-    regions_a = parse_regions(args.regions)
-    regions_b = parse_regions_file(args.regions_file)
-    if regions_a and regions_b:
-        merged: Dict[str, List[Tuple[int, int]]] = {}
-        for src in (regions_a, regions_b):
-            for chrom, ivals in src.items():
-                merged.setdefault(chrom, []).extend(ivals)
-        for chrom in list(merged.keys()):
-            ivals = sorted(merged[chrom])
-            merged2: List[Tuple[int, int]] = []
-            for s, e in ivals:
-                if not merged2 or s > merged2[-1][1] + 1:
-                    merged2.append([s, e])
-                else:
-                    merged2[-1][1] = max(merged2[-1][1], e)
-            merged[chrom] = [(s, e) for s, e in merged2]
-        regions = merged
-    else:
-        regions = regions_a or regions_b
-
-    picked_local_indices = None
-    if args.random_variants is not None:
-        if args.random_variants <= 0:
-            raise ValueError("--random-variants must be >0")
-        picked_local_indices = reservoir_pick_variant_indices(vcf_path, regions, args.random_variants, args.seed)
-
-    if args.groups_file:
-        group_map = parse_groups_file(args.groups_file, selected_names)
-    elif args.random_groups is not None:
-        if args.random_groups <= 0 or args.random_groups > len(selected_names):
-            raise ValueError("--random-groups must be within [1, number_of_selected_samples]")
-        group_map = make_random_groups(selected_names, args.random_groups, args.seed)
-    else:
-        group_map = {s: "All" for s in selected_names}
-
-    # ----- Compute stats and build plot rows -----
-    stats = [{
-        "sample": name,
-        "total": 0,
-        "called": 0,
-        "missing": 0,
-        "het": 0,
-        "snp": 0,
-        "indel": 0,
-        "code0": 0,
-        "code1": 0,
-        "code2": 0,
-    } for name in selected_names]
-
-    plot_rows: List[List[int]] = []
-    plot_meta: List[Tuple[str, int]] = []
-    plot_seen = 0
-    rnd = random.Random(args.seed)
-    picked_set = set(picked_local_indices) if picked_local_indices is not None else None
-    region_local_counter = 0
-
-    for rec in iterate_records(vcf_path, regions):
-        chrom = rec.chrom
-        pos = rec.pos
-        indel_flag = is_indel_site(rec.ref, rec.alts)
-
-        if picked_set is not None and region_local_counter not in picked_set:
-            region_local_counter += 1
-            continue
-
-        row_codes: List[int] = []
-        gt_list: List[Tuple[int, bool]] = []
-        for name in selected_names:
-            gt_raw = rec.samples[name].get("GT", None)
-            code, nonref = encode_gt(gt_raw)
-            row_codes.append(code)
-            gt_list.append((code, nonref))
-
-        for i in range(len(selected_names)):
-            st = stats[i]
-            st["total"] += 1
-            code, nonref = gt_list[i]
-            if code == -1:
-                st["missing"] += 1
-            else:
-                st["called"] += 1
-                if code == 1:
-                    st["het"] += 1
-                if code == 0:
-                    st["code0"] += 1
-                elif code == 1:
-                    st["code1"] += 1
-                elif code == 2:
-                    st["code2"] += 1
-                if indel_flag is not None:
-                    if args.count_ref:
-                        if indel_flag:
-                            st["indel"] += 1
-                        else:
-                            st["snp"] += 1
-                    else:
-                        if nonref:
-                            if indel_flag:
-                                st["indel"] += 1
-                            else:
-                                st["snp"] += 1
-
-        if picked_set is not None:
-            plot_rows.append(row_codes)
-            plot_meta.append((chrom, pos))
-        else:
-            if plot_seen < args.max_plot_variants:
-                plot_rows.append(row_codes)
-                plot_meta.append((chrom, pos))
-            else:
-                j = rnd.randrange(plot_seen + 1)
-                if j < args.max_plot_variants:
-                    plot_rows[j] = row_codes
-                    plot_meta[j] = (chrom, pos)
-            plot_seen += 1
-
-        region_local_counter += 1
-
-    # ----- Outputs -----
-    os.makedirs(args.out_dir, exist_ok=True)
-    out_prefix = os.path.join(args.out_dir, args.out_name)
-    stats_path = f"{out_prefix}.stats.tsv"
-    with open(stats_path, "w", encoding="utf-8") as w:
-        w.write("\t".join([
-            "sample", "total_sites", "called", "missing",
-            "het_count", "het_rate", "missing_rate",
-            "snp_count", "indel_count", "code0", "code1", "code2"
-        ]) + "\n")
-        for st in stats:
-            called = st["called"]
-            total = st["total"]
-            het_rate = (st["het"] / called) if called > 0 else 0.0
-            missing_rate = (st["missing"] / total) if total > 0 else 0.0
-            w.write("\t".join([
-                st["sample"],
-                str(total),
-                str(called),
-                str(st["missing"]),
-                str(st["het"]),
-                f"{het_rate:.6f}",
-                f"{missing_rate:.6f}",
-                str(st["snp"]),
-                str(st["indel"]),
-                str(st["code0"]),
-                str(st["code1"]),
-                str(st["code2"]),
-            ]) + "\n")
-
-    # plot using visualizer
-    if plot_rows:
-        visualizer = Visualizer()
-        fig_path = f"{out_prefix}.genotypes.{image_format}"
-        visualizer.plot_genotype(
-            plot_rows=plot_rows,
-            plot_meta=plot_meta,
-            selected_sample_names=selected_names,
-            stats=stats,
-            group_map=group_map,
-            sample_metric=args.sample_metric,
-            variant_metric=args.variant_metric,
-            figsize=(args.width, args.height),
-            out_path=fig_path,
-        )
-        logger.info(f"Genotype figure saved to: {fig_path}")
-
 
     logger.info("Plotting completed!")
 
@@ -701,17 +529,97 @@ def plot_qtl_map(args):
     # Load QTL blocks if provided
     qtl_blocks = []
     for i, qtl_file in enumerate(args.qtl):
-        base_name = os.path.splitext(os.path.basename(qtl_file))[0]
-        base_name = base_name.split(".")[0]
         qtl_df = qtl.read_block_file(qtl_file)
-        qtl_blocks.append(qtl_df.assign(trait=f"{base_name}_{i}"))
+        if "trait" not in qtl_df.columns:
+            base_name = os.path.splitext(os.path.basename(qtl_file))[0]
+            base_name = base_name.split(".")[0]
+            qtl_df = qtl_df.assign(trait=f"{base_name}_{i}")
+        qtl_blocks.append(qtl_df)
     qtl_blocks = pd.concat(qtl_blocks)
     logger.info(f"Loaded {len(qtl_blocks)} QTL blocks from {len(args.qtl)} files.")
     # Load genome file if provided
     genome = qtl.read_genome_file(args.genome)
     logger.info(f"Loaded genome file with {len(genome)} chromosomes.")
+
+    def parse_color_spec(color_arg: Optional[str]):
+        if not color_arg:
+            return None
+        candidate = os.path.expanduser(color_arg)
+        if os.path.isfile(candidate):
+            try:
+                color_df = pd.read_csv(candidate, sep=None, engine="python")
+            except Exception as exc:
+                raise ValueError(f"Unable to parse color file '{candidate}'.") from exc
+            if color_df.empty:
+                raise ValueError(f"Color file '{candidate}' is empty.")
+            if color_df.shape[1] == 1:
+                palette = color_df.iloc[:, 0].dropna().astype(str).str.strip()
+                palette = [c for c in palette if c]
+                if not palette:
+                    raise ValueError(f"No valid colors found in '{candidate}'.")
+                return palette
+            trait_col = color_df.columns[0]
+            color_col = color_df.columns[1]
+            mapping = {}
+            for trait, color in zip(color_df[trait_col], color_df[color_col]):
+                trait_str = str(trait).strip()
+                color_str = str(color).strip()
+                if trait_str and color_str:
+                    mapping[trait_str] = color_str
+            if not mapping:
+                raise ValueError(f"No valid trait-color pairs found in '{candidate}'.")
+            return mapping
+        if "," in color_arg:
+            palette = [c.strip() for c in color_arg.split(",") if c.strip()]
+            if not palette:
+                raise ValueError("--colors must contain at least one entry when comma-separated.")
+            return palette
+        return color_arg.strip()
+
+    def load_annotation_file(path: Optional[str], delimiter: Optional[str]) -> Optional[pd.DataFrame]:
+        if not path:
+            return None
+        candidate = os.path.expanduser(path)
+        if not os.path.isfile(candidate):
+            raise ValueError(f"Annotation file not found: {candidate}")
+        sep = delimiter
+        if sep is None:
+            lowered = candidate.lower()
+            if lowered.endswith((".tsv", ".txt")):
+                sep = "\t"
+            else:
+                sep = ","
+        try:
+            ann_df = pd.read_csv(candidate, sep=sep)
+        except Exception as exc:
+            raise ValueError(f"Unable to read annotation file '{candidate}'.") from exc
+        required_cols = {"chr", "bp1", "bp2", "label"}
+        if not required_cols.issubset(ann_df.columns):
+            missing = required_cols - set(ann_df.columns)
+            raise ValueError(f"Annotation file missing required columns: {sorted(missing)}")
+        return ann_df
+
+    color_spec = parse_color_spec(args.colors)
+    ann_df = load_annotation_file(args.annotation, args.annotation_sep)
+
+    legend_kwargs: Optional[Dict[str, object]] = None
+    if args.legend_loc or args.legend_ncol is not None or args.legend_anchor:
+        legend_kwargs = {}
+        if args.legend_loc:
+            legend_kwargs["loc"] = args.legend_loc
+        if args.legend_ncol is not None:
+            legend_kwargs["ncol"] = args.legend_ncol
+        if args.legend_anchor:
+            parts = [p.strip() for p in args.legend_anchor.split(",") if p.strip()]
+            if len(parts) != 2:
+                raise ValueError("--legend-anchor must contain two comma-separated numbers, e.g., '1.02,1'.")
+            try:
+                legend_kwargs["bbox_to_anchor"] = (float(parts[0]), float(parts[1]))
+            except ValueError as exc:
+                raise ValueError("--legend-anchor values must be numeric, e.g., '1.02,1'.") from exc
+
     # Create figure
-    fig = plt.figure(figsize=(args.width, args.height))
+    fig = plt.figure(figsize=(args.width, args.height), dpi=args.dpi)
     ax = fig.add_subplot(111)
     chrom_style = {
         "width": args.cw, 
@@ -722,9 +630,44 @@ def plot_qtl_map(args):
         "edgecolor": args.ec,
         "edge_width": args.ew
     }
-    visualizer.plot_qtl_map(qtl_blocks, genome, ax=ax, chrom_style=chrom_style)
+    
+    text_style = {
+        "font_family": args.font_family,
+        "title_fontsize": args.title_fontsize,
+        "subtitle_fontsize": args.subtitle_fontsize,
+        "label_fontsize": args.label_fontsize,
+        "tick_fontsize": args.tick_fontsize,
+    }
+
+    ann_style = {
+        "max_width": args.annotation_max_width,
+        "line_spacing": args.annotation_line_spacing,
+        "arrowstyle": args.annotation_arrowstyle,
+        "boxstyle": args.annotation_boxstyle,
+        "facecolor": args.annotation_facecolor,
+        "edgecolor": args.annotation_edgecolor,
+    }
+
+    visualizer.plot_qtl_map(
+        qtl_blocks,
+        genome,
+        chrom_style=chrom_style,
+        ann_data=ann_df,
+        ann_style=ann_style,
+        colors=color_spec,
+        orientation=args.orientation,
+        unit=args.unit,
+        ax=ax,
+        figsize=(args.width, args.height),
+        dpi=args.dpi,
+        title=args.title,
+        subtitle=args.subtitle,
+        legend_title=args.legend_title,
+        legend_kwargs=legend_kwargs,
+        text_style=text_style
+    )
     plt.tight_layout()
-    plt.savefig(os.path.join(args.out_dir, f"{args.out_name}.{args.format}"), dpi=300, bbox_inches="tight")
+    plt.savefig(os.path.join(args.out_dir, f"{args.out_name}.{args.format}"), dpi=args.dpi, bbox_inches="tight")
     plt.close()
     logger.info("Plotting completed!")
 
@@ -802,6 +745,47 @@ def plot_dist(args):
     logger.info("Plotting completed!")
 
 
+def plot_qtn_map(args):
+    """QTN genotype heatmap"""
+    import importlib
+    try:
+        pysam = importlib.import_module('pysam')
+    except Exception as e:
+        raise RuntimeError("pysam is required for reading VCF files. Please install pysam.") from e
+
+    logger.info("Starting qtnmap plot subcommand...")
+    qtl = QTL()
+    visualizer = Visualizer()
+
+    # Parameters required: qtl, vcf
+    if args.qtl is None or args.vcf is None:
+        raise ValueError("--qtl and --vcf are required for plotting QTN map")
+
+    # Load QTL blocks
+    qtl_blocks = []
+    for qtl_file in args.qtl:
+        qtl_df = qtl.read_block_file(qtl_file)
+        qtl_blocks.append(qtl_df)
+    qtl_blocks = pd.concat(qtl_blocks)
+    logger.info(f"Loaded {len(qtl_blocks)} QTL blocks from {len(args.qtl)} files.")
+
+    # Output path
+    os.makedirs(args.out_dir, exist_ok=True)
+    out_path = os.path.join(args.out_dir, f"{args.out_name}.{args.format}")
+
+    visualizer.plot_qtn_map(
+        vcf_path=args.vcf,
+        qtl_blocks=qtl_blocks,
+        samples_file=args.samples_file,
+        by=args.by,
+        sample_metric=args.sample_metric,
+        variant_metric=args.variant_metric,
+        figsize=(args.width, args.height),
+        out_path=out_path
+    )
+    logger.info("Plotting completed!")
+
+
 def main():
     description = """
     qtlscan: A tool for scanning QTL and visualizing the results from GWAS summary statistics.
@@ -875,6 +859,7 @@ def main():
     phe_stat_p.add_argument("--extend-tail", type=float, default=0.0, help="Extend lower bound (0-1) for KDE")
     phe_stat_p.add_argument("--extend-head", type=float, default=0.0, help="Extend upper bound (0-1) for KDE")
     phe_stat_p.add_argument("--orientation", type=str, default="vertical", choices=["vertical", "horizontal"], help="Plot orientation")
+    phe_stat_p.add_argument("--colors", type=str, nargs="+", help="Colors for plots")
     phe_stat_p.add_argument("--alpha", type=float, default=0.7, help="Transparency for plots")
     phe_stat_p.add_argument("--xlabel", type=str, default=None, help="X label")
     phe_stat_p.add_argument("--ylabel", type=str, default=None, help="Y label")
@@ -892,35 +877,128 @@ def main():
     scan_parser.add_argument("--out_name", type=str, default="gwas", help="Output file name prefix (default: %(default)s)")
     scan_parser.add_argument("--out_dir", type=str, default=".", help="Output directory (default: %(default)s)")
     scan_parser.add_argument("--min_snps", type=int, default=3, help="Minimum number of SNPs per QTL block (default: %(default)s)")
-    scan_parser.add_argument("--ld_window", type=int, default=999999, help="Maximum number of SNPs in LD window (default: %(default)s)")
+    scan_parser.add_argument("--ld_window", type=int, default=9999999, help="Maximum number of SNPs in LD window (default: %(default)s)")
     scan_parser.add_argument("--ld_window_kb", type=int, default=100, help="Maximum number of kb in LD window (default: %(default)s)")
     scan_parser.add_argument("--ld_window_r2", type=float, default=0.2, help="LD threshold (R^2) for LD window (default: %(default)s)")
     scan_parser.add_argument("--threads", type=int, default=cpu_count(), help="Number of threads for PLINK (default: %(default)s)")
-    scan_parser.add_argument("--pvalue", type=float, default=1.0, help="P-value threshold for significant SNPs (default: %(default)s)")
+    scan_parser.add_argument(
+        "--pvalue",
+        type=float,
+        nargs="+",
+        default=[1.0],
+        metavar="P",
+        help=(
+            "One or two P-value thresholds. If two are provided, the larger value filters GWAS input "
+            "and the smaller value evaluates core SNP counts within QTL blocks."
+        ),
+    )
     scan_parser.add_argument("--gff", type=str, help="Path to GFF file for gene annotation")
     scan_parser.add_argument("--main_type", type=str, default="mRNA", help="Main feature type to extract from GFF file (default: %(default)s)")
     scan_parser.add_argument("--attr_id", type=str, default="ID", help="Attribute ID to extract gene names from GFF file (default: %(default)s)")
+    scan_parser.add_argument(
+        "--names",
+        type=str,
+        required=True,
+        help="Trait names in output order (comma-separated string or path to a newline-delimited file); count must match summaries or phenotypes",
+    )
     scan_parser.set_defaults(func=run_scan)
 
+    # gwas subcommand
+    gwas_parser = subparsers.add_parser("gwas", help="Run GWAS using GEMMA or EMMAX")
+    gwas_parser.add_argument("--vcf", type=str, required=True, help="Path to VCF genotype file")
+    gwas_parser.add_argument(
+        "--phe",
+        type=str,
+        required=True,
+        help="Phenotype file (tab-separated, no header, first two columns are sample identifiers)",
+    )
+    gwas_parser.add_argument(
+        "--method",
+        type=str,
+        default="gemma",
+        choices=["gemma", "emmax"],
+        help="GWAS engine to use (default: %(default)s)",
+    )
+    gwas_parser.add_argument("--out_dir", type=str, default=".", help="Output directory (default: %(default)s)")
+    gwas_parser.add_argument("--out_name", type=str, default="gwas", help="Output file name prefix (default: %(default)s)")
+    gwas_parser.set_defaults(func=run_gwas)
+
     # QTL Network subcommand
-    qtl_network_parser = subparsers.add_parser("qtlnetwork", help="Generate QTL network")
-    qtl_network_parser.add_argument("--qtl", type=str, nargs="+", required=True, help="Path(s) to QTL blocks csv file(s). Multiple files with space separated are allowed.")
-    qtl_network_parser.add_argument("--vcf", type=str, required=True, help="Path to VCF genotype file")
-    qtl_network_parser.add_argument("--layout", type=str, default="spring", choices=['spring', 'atlas'], 
+    qtl_network_parser = subparsers.add_parser("network", help="Generate QTL network")
+    
+    input_group = qtl_network_parser.add_argument_group("Input Options")
+    input_ex_group = input_group.add_mutually_exclusive_group(required=True)
+    input_ex_group.add_argument("--qtl", type=str, nargs="+", help="Path(s) to QTL blocks csv file(s). Multiple files with space separated are allowed.")
+    input_ex_group.add_argument("--edge", type=str, help="Path to existing edge dataframe file (skips LD calculation).")
+    input_group.add_argument("--vcf", type=str, help="Path to VCF genotype file (required if --qtl is used)")
+    input_group.add_argument("--names", type=str, nargs="+", help="Rename different QTL blocks file(s) for visualization")
+    input_group.add_argument(
+        "--trait_colors",
+        type=str,
+        help="Path to a trait\u2013color mapping file (trait and color separated by comma/tab/space per line)"
+    )
+
+    layout_group = qtl_network_parser.add_argument_group("Layout Options")
+    layout_group.add_argument("--layout", type=str, default="cluster", choices=['spring', 'kamada_kawai', 'fruchterman_reingold', 'forceatlas2'],
                                     help="Layout for QTL network (default: %(default)s)")
-    qtl_network_parser.add_argument("--k", type=float, default=0.3, help="Spring layout parameter k (default: %(default)s)")
-    qtl_network_parser.add_argument("--seed", type=int, default=42, help="Random seed for deterministic node layouts (default: %(default)s)")
-    qtl_network_parser.add_argument("--names", type=str, nargs="+", help="Rename different QTL blocks file(s) for visualization")
-    qtl_network_parser.add_argument("--min_weight", type=float, default=0, help="Minimum weight for edges (default: %(default)s)")
-    qtl_network_parser.add_argument("--with_labels", action="store_true", help="Whether to show node labels")
-    qtl_network_parser.add_argument("--node_size_factor", type=float, default=10, help="Factor to multiply -log10(pvalue) for node size (default: %(default)s)")
-    qtl_network_parser.add_argument("--edge_width_factor", type=float, default=3, help="Factor to multiply LD value for edge width (default: %(default)s)")
-    qtl_network_parser.add_argument("--width", type=float, default=10, help="Figure width (default: %(default)s)")
-    qtl_network_parser.add_argument("--height", type=float, default=8, help="Figure height (default: %(default)s)")
-    qtl_network_parser.add_argument("--format", type=str, default="png", help="Output format, e.g., pdf or png (default: %(default)s)")
-    qtl_network_parser.add_argument("--out_dir", type=str, default=".", help="Output directory (default: %(default)s)")
-    qtl_network_parser.add_argument("--out_name", type=str, default="output", help="Output file name prefix (default: %(default)s)")
-    qtl_network_parser.set_defaults(func=run_qtlnetwork)
+    layout_group.add_argument("--k", type=float, default=0.3, help="Spring layout parameter k (default: %(default)s)")
+    layout_group.add_argument("--seed", type=int, default=42, help="Random seed for deterministic node layouts (default: %(default)s)")
+    layout_group.add_argument("--min_weight", type=float, default=0, help="Minimum weight for edges (default: %(default)s)")
+
+    node_group = qtl_network_parser.add_argument_group("Node Styling")
+    node_group.add_argument("--node_size_factor", type=float, default=5, help="Factor to multiply -log10(pvalue) for node size (default: %(default)s)")
+    node_group.add_argument("--node_alpha", type=float, default=0.8, help="Node transparency (default: %(default)s)")
+    node_group.add_argument("--node_linewidths", type=float, default=1.0, help="Node border width (default: %(default)s)")
+    
+    edge_group = qtl_network_parser.add_argument_group("Edge Styling")
+    edge_group.add_argument("--edge_width_factor", type=float, default=3, help="Factor to multiply LD value for edge width (default: %(default)s)")
+    edge_group.add_argument("--edge_alpha", type=float, default=0.5, help="Edge transparency (default: %(default)s)")
+    edge_group.add_argument("--edge_color", type=str, default="gray", help="Edge color (default: %(default)s)")
+    edge_group.add_argument("--edge_style", type=str, default="solid", choices=['solid', 'dashed', 'dotted', 'dashdot'], help="Edge line style (default: %(default)s)")
+    edge_group.add_argument("--edge_arrows", action="store_true", default=True, help="Show edge arrows (default: %(default)s)")
+    edge_group.add_argument("--no_edge_arrows", action="store_false", dest="edge_arrows", help="Hide edge arrows")
+    edge_group.add_argument("--edge_arrowsize", type=int, default=10, help="Edge arrow size (default: %(default)s)")
+    edge_group.add_argument("--edge_connectionstyle", type=str, default="arc3,rad=0.2", help="Edge connection style (default: %(default)s)")
+
+    label_group = qtl_network_parser.add_argument_group("Label Styling")
+    label_group.add_argument("--with_labels", action="store_true", help="Whether to show node labels")
+    label_group.add_argument("--node_labels_size", type=float, default=6, help="Node label font size (default: %(default)s)")
+    label_group.add_argument("--node_labels_color", type=str, default="white", help="Node label color (default: %(default)s)")
+    label_group.add_argument("--label_font_weight", type=str, default="normal", help="Label font weight (default: %(default)s)")
+    label_group.add_argument("--label_font_family", type=str, default="sans-serif", help="Label font family (default: %(default)s)")
+
+    output_group = qtl_network_parser.add_argument_group("Output Options")
+    output_group.add_argument("--width", type=float, default=10, help="Figure width (default: %(default)s)")
+    output_group.add_argument("--height", type=float, default=8, help="Figure height (default: %(default)s)")
+    output_group.add_argument("--format", type=str, default="png", help="Output format, e.g., pdf or png (default: %(default)s)")
+    output_group.add_argument("--out_dir", type=str, default=".", help="Output directory (default: %(default)s)")
+    output_group.add_argument("--out_name", type=str, default="output", help="Output file name prefix (default: %(default)s)")
+
+    qtl_network_parser.set_defaults(func=run_network)
+
+    # report subcommand
+    report_parser = subparsers.add_parser("report", help="Generate an interactive HTML summary for QTL blocks")
+    report_input_group = report_parser.add_mutually_exclusive_group(required=True)
+    report_input_group.add_argument(
+        "--qtl",
+        type=str,
+        nargs="+",
+        help="Path(s) to QTL blocks csv file(s)"
+    )
+    report_input_group.add_argument(
+        "--qtl_dir",
+        type=str,
+        help="Directory containing one or more *.blocks.csv files"
+    )
+    report_parser.add_argument(
+        "--names",
+        type=str,
+        help="Optional comma-separated names or newline-delimited file to rename each QTL dataset",
+    )
+    report_parser.add_argument("--top_n", type=int, default=20, help="Number of most significant blocks to highlight")
+    report_parser.add_argument("--out_dir", type=str, default=".", help="Output directory (default: %(default)s)")
+    report_parser.add_argument("--out_name", type=str, default="qtl_report", help="Output HTML file name prefix (default: %(default)s)")
+    report_parser.set_defaults(func=run_report)
 
     # plot subcommand
     plot_parser = subparsers.add_parser("plot", help="Visualize QTL results")
@@ -935,7 +1013,7 @@ def main():
     manhattan_parser.add_argument("--point_size", type=float, default=5, help="Point size for Manhattan plot (default: %(default)s)")
     manhattan_parser.add_argument("--qq", action="store_true", help="Whether to plot QQ plot (default: %(default)s)")
     manhattan_parser.add_argument("--width", type=float, default=10, help="Figure width (default: %(default)s)")
-    manhattan_parser.add_argument("--height", type=float, default=8, help="Figure height (default: %(default)s)")
+    manhattan_parser.add_argument("--height", type=float, default=3, help="Figure height (default: %(default)s)")
     manhattan_parser.add_argument("--format", type=str, default="png", help="Output format, e.g., pdf or png (default: %(default)s)")
     manhattan_parser.add_argument("--out_dir", type=str, default=".", help="Output directory (default: %(default)s)")
     manhattan_parser.add_argument("--out_name", type=str, default="output", help="Output file name prefix (default: %(default)s)")
@@ -976,12 +1054,50 @@ def main():
     qtlmap_parser.add_argument("--fc", type=str, default="lightgrey", help="Chromosome facecolor (default: %(default)s)")
     qtlmap_parser.add_argument("--ec", type=str, default="black", help="Chromosome edgecolor (default: %(default)s)")
     qtlmap_parser.add_argument("--ew", type=float, default=0.8, help="Chromosome edgewidth (default: %(default)s)")
+    qtlmap_parser.add_argument("--orientation", type=str, default="vertical", choices=["vertical", "horizontal"], help="Layout orientation for chromosomes (default: %(default)s)")
+    qtlmap_parser.add_argument("--unit", type=str, default="mb", choices=["mb", "kb", "bp"], help="Unit for displaying genomic positions (default: %(default)s)")
+    qtlmap_parser.add_argument("--colors", type=str, help="Trait color specification: comma-separated list, matplotlib colormap name, or path to trait-color table")
+    qtlmap_parser.add_argument("--title", type=str, help="Figure title")
+    qtlmap_parser.add_argument("--subtitle", type=str, help="Optional subtitle placed beneath the title")
+    qtlmap_parser.add_argument("--legend-title", type=str, default="Traits", help="Legend title (default: %(default)s)")
+    qtlmap_parser.add_argument("--legend-loc", type=str, help="Legend location (e.g., upper left)")
+    qtlmap_parser.add_argument("--legend-ncol", type=int, help="Number of legend columns")
+    qtlmap_parser.add_argument("--legend-anchor", type=str, help="Legend bbox_to_anchor as 'x,y' (optional)")
+    qtlmap_parser.add_argument("--font-family", type=str, default="Arial", help="Font family applied to the plot (default: %(default)s)")
+    qtlmap_parser.add_argument("--title-fontsize", type=int, default=18, help="Font size for title (default: %(default)s)")
+    qtlmap_parser.add_argument("--subtitle-fontsize", type=int, default=12, help="Font size for subtitle (default: %(default)s)")
+    qtlmap_parser.add_argument("--label-fontsize", type=int, default=12, help="Font size for axis labels (default: %(default)s)")
+    qtlmap_parser.add_argument("--tick-fontsize", type=int, default=10, help="Font size for tick labels (default: %(default)s)")
+    qtlmap_parser.add_argument("--annotation", type=str, help="Optional annotation file with columns chr,bp1,bp2,label")
+    qtlmap_parser.add_argument("--annotation-sep", type=str, help="Delimiter for annotation file (default: infer from extension)")
+    qtlmap_parser.add_argument("--annotation-max-width", type=int, default=28, help="Maximum characters per annotation line before wrapping (default: %(default)s)")
+    qtlmap_parser.add_argument("--annotation-line-spacing", type=float, default=1.2, help="Line spacing multiplier for annotation text (default: %(default)s)")
+    qtlmap_parser.add_argument("--annotation-arrowstyle", type=str, default="-", help="Arrow style for annotations (default: %(default)s)")
+    qtlmap_parser.add_argument("--annotation-boxstyle", type=str, default="round,pad=0.2", help="Box style for annotation text (default: %(default)s)")
+    qtlmap_parser.add_argument("--annotation-facecolor", type=str, default="white", help="Face color for annotation boxes (default: %(default)s)")
+    qtlmap_parser.add_argument("--annotation-edgecolor", type=str, default="none", help="Edge color for annotation boxes (default: %(default)s)")
+    qtlmap_parser.add_argument("--dpi", type=int, default=300, help="Figure DPI (default: %(default)s)")
     qtlmap_parser.add_argument("--width", type=float, default=10, help="Figure width (default: %(default)s)")
     qtlmap_parser.add_argument("--height", type=float, default=8, help="Figure height (default: %(default)s)")
     qtlmap_parser.add_argument("--format", type=str, default="png", help="Output format, e.g., pdf or png (default: %(default)s)")
     qtlmap_parser.add_argument("--out_dir", type=str, default=".", help="Output directory (default: %(default)s)")
     qtlmap_parser.add_argument("--out_name", type=str, default="output", help="Output file name prefix (default: %(default)s)")
     qtlmap_parser.set_defaults(plot_func=plot_qtl_map)
+
+    # Group for QTN Map
+    qtnmap_parser = plot_subparsers.add_parser("qtnmap", help="Generate QTN genotype heatmap")
+    qtnmap_parser.add_argument("--qtl", type=str, nargs="+", required=True, help="Path(s) to QTL blocks csv file(s)")
+    qtnmap_parser.add_argument("--vcf", type=str, required=True, help="Path to VCF genotype file")
+    qtnmap_parser.add_argument("--samples_file", type=str, help="Path to samples file (2 columns: sample, group)")
+    qtnmap_parser.add_argument("--by", type=str, default="trait", choices=["trait", "chr"], help="Group variants by trait or chr (default: %(default)s)")
+    qtnmap_parser.add_argument("--sample_metric", type=str, default="count", choices=["mis", "het", "count", "count0", "count1", "count2"], help="Sample metric (default: %(default)s)")
+    qtnmap_parser.add_argument("--variant_metric", type=str, default="maf", choices=["mis", "het", "maf", "count", "count0", "count1", "count2"], help="Variant metric (default: %(default)s)")
+    qtnmap_parser.add_argument("--width", type=float, default=12, help="Figure width (default: %(default)s)")
+    qtnmap_parser.add_argument("--height", type=float, default=10, help="Figure height (default: %(default)s)")
+    qtnmap_parser.add_argument("--format", type=str, default="png", help="Output format (default: %(default)s)")
+    qtnmap_parser.add_argument("--out_dir", type=str, default=".", help="Output directory (default: %(default)s)")
+    qtnmap_parser.add_argument("--out_name", type=str, default="output", help="Output file name prefix (default: %(default)s)")
+    qtnmap_parser.set_defaults(plot_func=plot_qtn_map)
 
     # Group for Distribution Plot
     dist_parser = plot_subparsers.add_parser("dist", help="Generate data distribution plots")
@@ -1016,93 +1132,6 @@ def main():
     dist_parser.add_argument("--out_name", type=str, default="output", help="Output file name prefix (default: %(default)s)")
     dist_parser.set_defaults(plot_func=plot_dist)
 
-    # Group for Genotype Heatmap from VCF
-    geno_parser = plot_subparsers.add_parser("genotype", help="Generate genotype heatmap and per-sample/variant metrics from VCF")
-    geno_parser.add_argument("--vcf", type=str, required=True, help="Path to VCF/BCF file (supports .gz)")
-    geno_parser.add_argument("--samples", default=None, help="Comma-separated sample names")
-    geno_parser.add_argument("--samples_file", default=None, help="File with one sample name per line")
-    geno_parser.add_argument("--random_samples", type=int, default=None, help="Number of random samples to select")
-    geno_parser.add_argument("--regions", nargs="+", default=None, help="Genomic regions like chr1:1-100000; can be provided multiple times")
-    geno_parser.add_argument("--regions_file", default=None, help="BED file with regions: chrom start end")
-    geno_parser.add_argument("--random_variants", type=int, default=None, help="Randomly sample N variants after region filtering")
-    geno_parser.add_argument("--count_ref", action="store_true", help="Count SNP/INDEL per site for non-missing calls (default: count only ALT carriers)")
-    geno_parser.add_argument("--max_plot_variants", type=int, default=2000, help="Max variants to plot via reservoir sampling when --random-variants is not set")
-    geno_parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    geno_parser.add_argument("--groups_file", default=None, help="Sample grouping file: two columns 'sample group', whitespace/tab/comma separated")
-    geno_parser.add_argument("--random_groups", type=int, default=None, help="Number of random groups when no --groups_file is provided")
-    geno_parser.add_argument("--sample_metric", default="mis",
-                       choices=["mis", "het", "count", "count0", "count1", "count2"],
-                       help="Top subplot metric for samples: mis/het/count or count0/count1/count2")
-    geno_parser.add_argument("--variant_metric", default="maf", choices=["mis", "het", "maf"], help="Right subplot metric for variants")
-    geno_parser.add_argument("--width", type=float, default=10, help="Figure width (default: %(default)s)")
-    geno_parser.add_argument("--height", type=float, default=8, help="Figure height (default: %(default)s)")
-    geno_parser.add_argument("--format", type=str, default="png", help="Image format: png/pdf/svg (default: %(default)s)")
-    geno_parser.add_argument("--out_dir", type=str, default=".", help="Output directory (default: %(default)s)")
-    geno_parser.add_argument("--out_name", type=str, default="output", help="Output file name prefix (default: %(default)s)")
-    geno_parser.set_defaults(plot_func=plot_genotype)
-
-    # ML subcommands group
-    ml_parser = subparsers.add_parser("ml", help="Machine learning workflows: train models and run predictions")
-    ml_subparsers = ml_parser.add_subparsers(dest="ml_command", help="ML subcommands")
-
-    # ml train
-    ml_train = ml_subparsers.add_parser("train", help="Train genotype-to-phenotype model(s) from VCF + phenotype and generate report")
-    # inputs
-    ml_train.add_argument("--vcf", type=str, required=True, help="Path to VCF/VCF.GZ genotype file")
-    ml_train.add_argument("--phe", type=str, required=True, help="Path to phenotype file (CSV/TSV)")
-    ml_train.add_argument("--sample-col", type=str, default=None, help="Sample ID column name in phenotype file (default: auto-detect first column)")
-    ml_train.add_argument("--traits", type=str, default=None, help="Comma separated trait names; default: all non-sample columns")
-    ml_train.add_argument("--target-type", type=str, default="reg", choices=["reg", "clf"], help="Task type: regression or classification (default: %(default)s)")
-    # variant selection & QC
-    ml_train.add_argument("--variant-selection", type=str, default="all", choices=["all", "random", "ids"], help="Variant selection strategy (default: %(default)s)")
-    ml_train.add_argument("--random-variants", type=int, default=None, help="When variant-selection=random, number of variants to sample")
-    ml_train.add_argument("--variant-ids-file", type=str, default=None, help="When variant-selection=ids, file containing variant IDs (one per line)")
-    ml_train.add_argument("--maf-min", type=float, default=0.01, help="Minimum MAF to keep a variant (default: %(default)s)")
-    ml_train.add_argument("--max-missing", type=float, default=0.2, help="Maximum missing rate to keep a variant (default: %(default)s)")
-    # preprocessing & split
-    ml_train.add_argument("--impute", type=str, default="mean", choices=["mean", "median", "most_frequent"], help="Imputation strategy (default: %(default)s)")
-    ml_train.add_argument("--scale", type=str, default="none", choices=["none", "standard", "minmax"], help="Feature scaling (default: %(default)s)")
-    ml_train.add_argument("--test-size", type=float, default=0.2, help="Test size ratio (default: %(default)s)")
-    ml_train.add_argument("--cv", type=int, default=5, help="CV folds (default: %(default)s)")
-    ml_train.add_argument("--eval-cv", action="store_true", help="Also run K-fold evaluation on the training split and report mean/std metrics (uses --cv folds)")
-    ml_train.add_argument("--seed", type=int, default=42, help="Random seed (default: %(default)s)")
-    # models & tuning
-    ml_train.add_argument("--model", type=str, default="lgb", choices=["svm", "lgb", "xgb", "rf", "lasso", "knn"], help="Model type (default: %(default)s)")
-    ml_train.add_argument("--auto-params", action="store_true", help="Enable heuristic auto-parameterization based on sample size and feature count; merged with --params (user values take precedence)")
-    ml_train.add_argument("--params", type=str, default=None, help="Path to JSON file of model parameters to override defaults")
-    ml_train.add_argument("--tune", type=str, default="none", choices=["none", "grid", "random", "bayes"], help="Hyperparameter tuning strategy (default: %(default)s)")
-    ml_train.add_argument("--n-iter", type=int, default=30, help="Iterations for random/bayes search (default: %(default)s)")
-    ml_train.add_argument("--param-grid", type=str, default=None, help="Path to JSON file for GridSearchCV param_grid")
-    ml_train.add_argument("--param-space", type=str, default=None, help="Path to JSON file for Random/Bayes param space")
-    ml_train.add_argument("--scoring", type=str, default=None, help="Custom scoring; default r2 for reg, roc_auc/accuracy for clf")
-    # importance & SHAP
-    ml_train.add_argument("--importance", type=str, default="shap", choices=["auto", "shap", "permutation", "none"], help="Feature importance method (default: %(default)s)")
-    ml_train.add_argument("--importance-topk", type=int, default=10, help="TopK features to plot in bar chart (default: %(default)s)")
-    ml_train.add_argument("--shap-background", type=int, default=200, help="Number of background samples for SHAP (default: %(default)s)")
-    ml_train.add_argument("--shap-dependence-topk", type=int, default=10, help="TopK features for SHAP dependence plots (default: %(default)s)")
-    ml_train.add_argument("--importance-fast", action="store_true", help="Use native importance for tree models to speed up (fallback from SHAP)")
-    # report & output
-    ml_train.add_argument("--report", dest="report", action="store_true", help="Enable HTML report (default: on)")
-    ml_train.add_argument("--no-report", dest="report", action="store_false", help="Disable HTML report")
-    ml_train.set_defaults(report=True)
-    ml_train.add_argument("--report-title", type=str, default="QTLScan Prediction Report", help="HTML report title (default: %(default)s)")
-    # Template is fixed and always used for report rendering; no per-run template flags
-    ml_train.add_argument("--width", type=float, default=6, help="Figure width (default: %(default)s)")
-    ml_train.add_argument("--height", type=float, default=5, help="Figure height (default: %(default)s)")
-    ml_train.add_argument("--format", type=str, default="png", help="Plot image format (default: %(default)s)")
-    ml_train.add_argument("--out_dir", type=str, default=".", help="Output directory (default: %(default)s)")
-    ml_train.add_argument("--out_name", type=str, default="train", help="Output name prefix (default: %(default)s)")
-    ml_train.set_defaults(func=run_train)
-
-    # ml predict
-    ml_pred = ml_subparsers.add_parser("predict", help="Apply a trained bundle to new features for prediction")
-    ml_pred.add_argument("--bundle", type=str, required=True, help="Path to a *.bundle.json saved by train")
-    ml_pred.add_argument("--features", type=str, required=True, help="Path to feature CSV/TSV for new samples (rows=samples; columns=features; first column=sample if --sample-col not set)")
-    ml_pred.add_argument("--sample-col", type=str, default=None, help="Sample ID column name (default: first column)")
-    ml_pred.add_argument("--trait", type=str, default=None, help="Optional trait name label for outputs")
-    ml_pred.add_argument("--out_dir", type=str, default=".", help="Output directory (default: %(default)s)")
-    ml_pred.add_argument("--out_name", type=str, default="predict", help="Output name prefix (default: %(default)s)")
-    ml_pred.set_defaults(func=run_predict)
     # Parse arguments and execute the corresponding subcommand
     args = parser.parse_args()
     if args.command:

@@ -347,7 +347,7 @@ def phe_stat(args):
 			df=df[[c for c in trait_cols]],
 			kind=args.plot_kind,
 			columns=None,  # use all selected trait_cols
-			colors=None,
+			colors=args.colors,
 			alpha=args.alpha,
 			orientation=args.orientation,
 			bins=args.bins,

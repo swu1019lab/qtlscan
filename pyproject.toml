@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "qtlscan"
 version = "1.0.0"
-description = "QTLScan: a toolkit for QTL detection, visualization, and genotype-to-phenotype prediction"
+description = "QTLScan: a toolkit for QTL detection, network construction, and visualization in genome-wide association studies"
 readme = "README.md"
 requires-python = ">=3.8"
 license = "BSD-3-Clause"
@@ -15,8 +15,7 @@ authors = [
 	{ name = "Xiaodong Li" },
 ]
 keywords = [
-	"GWAS", "QTL", "QTL network", "LD", "VCF",
-	"machine learning", "SHAP", "LightGBM", "XGBoost"
+	"GWAS", "QTL", "QTL network", "LD", "VCF"
 ]
 classifiers = [
 	"Programming Language :: Python :: 3",
@@ -28,21 +27,9 @@ dependencies = [
 	"numpy>=1.21",
 	"pandas>=1.5",
 	"scipy>=1.7",
-	"scikit-learn>=1.0",
 	"matplotlib>=3.6",
 	"pysam>=0.17.0",
-]
-
-[project.optional-dependencies]
-lgb = ["lightgbm>=4.0"]
-xgb = ["xgboost>=1.7"]
-shap = ["shap>=0.43"]
-opt = ["scikit-optimize>=0.9.0"]
-all = [
-	"lightgbm>=4.0",
-	"xgboost>=1.7",
-	"shap>=0.43",
-	"scikit-optimize>=0.9.0",
+	"jinja2>=3.0",
 ]
 
 [project.scripts]
