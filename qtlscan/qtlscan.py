@@ -1,4 +1,4 @@
-from qtlscan.qtl import QTL, QTLNetwork, QTLReport
+from qtlscan.qtl import QTL, QTLNetwork, QTLReport, QTLEffect
 from qtlscan.viz import Visualizer
 from qtlscan.log import logger
 from qtlscan.phe import phe_split, phe_merge, phe_stat
@@ -786,6 +786,21 @@ def plot_qtn_map(args):
     logger.info("Plotting completed!")
 
 
+def run_epistasis(args):
+    logger.info("Initializing epistasis analysis...")
+    qtl_effect = QTLEffect()
+    
+    qtl_effect.run_epistasis(
+        qtl_file=args.qtl,
+        phe_file=args.phe,
+        vcf_file=args.vcf,
+        out_dir=args.out_dir,
+        out_name=args.out_name,
+        p_threshold=args.pvalue,
+        genome=args.genome
+    )
+    logger.info("Epistasis analysis completed!")
+
 def main():
     description = """
     qtlscan: A tool for scanning QTL and visualizing the results from GWAS summary statistics.
@@ -1131,6 +1146,17 @@ def main():
     dist_parser.add_argument("--out_dir", type=str, default=".", help="Output directory (default: %(default)s)")
     dist_parser.add_argument("--out_name", type=str, default="output", help="Output file name prefix (default: %(default)s)")
     dist_parser.set_defaults(plot_func=plot_dist)
+
+    # epistasis subcommand
+    epistasis_parser = subparsers.add_parser("epistasis", help="Calculate and visualize epistatic effects")
+    epistasis_parser.add_argument("--qtl", type=str, required=True, help="Path to QTL blocks file")
+    epistasis_parser.add_argument("--phe", type=str, required=True, help="Path to phenotype file")
+    epistasis_parser.add_argument("--vcf", type=str, required=True, help="Path to VCF file")
+    epistasis_parser.add_argument("--genome", type=str, help="Path to genome file (chr, length) for visualization")
+    epistasis_parser.add_argument("--out_dir", type=str, default=".", help="Output directory")
+    epistasis_parser.add_argument("--out_name", type=str, default="epistasis", help="Output name")
+    epistasis_parser.add_argument("--pvalue", type=float, default=0.05, help="P-value threshold")
+    epistasis_parser.set_defaults(func=run_epistasis)
 
     # Parse arguments and execute the corresponding subcommand
     args = parser.parse_args()

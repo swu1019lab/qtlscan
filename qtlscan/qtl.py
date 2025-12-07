@@ -8,7 +8,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
-from itertools import combinations, chain
+from itertools import combinations
 from multiprocessing import cpu_count
 from typing import Optional, List, Dict, Any
 import networkx as nx
@@ -241,7 +241,7 @@ class QTL:
         ld_window: int = 10,
         threads: int = 1,
         out_dir: str = ".",
-        out_name: str = "qtl_network"
+        out_name: str = "qtlscan",
     ):
         """
         Calculate LD.
@@ -2239,3 +2239,406 @@ class QTLReport(QTL):
 
         logger.info(f"QTL report saved to {output_path}")
         return str(output_path.resolve())
+
+
+class QTLEffect(QTL):
+    def __init__(self):
+        """
+        Initialize the QTLEffect class for genetic effect analysis.
+        """
+        super().__init__()
+
+    def run_epistasis(
+        self, 
+        qtl_file: str, 
+        phe_file: str, 
+        vcf_file: str, 
+        out_dir: str = ".", 
+        out_name: str = "epistasis",
+        p_threshold: float = 0.05,
+        genome: str = None
+    ) -> pd.DataFrame:
+        """
+        Calculate epistatic effects (pairwise interactions) between QTLs.
+
+        :param qtl_file: Path to QTL block file (must contain 'trait', 'chr', 'lead', 'ps')
+        :param phe_file: Path to phenotype file (header required, 1st col = sample ID)
+        :param vcf_file: Path to VCF file
+        :param out_dir: Output directory
+        :param out_name: Output file name prefix
+        :param p_threshold: P-value threshold for filtering results in the output
+        :param genome: Path to genome file (chr, length) for visualization
+        :return: DataFrame containing epistasis results
+        """
+        try:
+            import pysam
+            import statsmodels.formula.api as smf
+        except ImportError as e:
+            raise ImportError(f"Required package not found: {e}. Please install pysam and statsmodels.")
+
+        os.makedirs(out_dir, exist_ok=True)
+        logger.info("Starting epistasis analysis...")
+
+        # 1. Load Data
+        # Load QTLs
+        qtl_df = self.read_block_file(qtl_file)
+        required_qtl_cols = {"trait", "chr", "lead", "ps"}
+        if not required_qtl_cols.issubset(qtl_df.columns):
+            raise ValueError(f"QTL file missing required columns: {required_qtl_cols - set(qtl_df.columns)}")
+
+        # Load Phenotypes
+        # Detect separator (tab or comma)
+        with open(phe_file, 'r') as f:
+            header_line = f.readline()
+            sep = '\t' if '\t' in header_line else ','
+        
+        phe_df = pd.read_csv(phe_file, sep=sep)
+        # Rename first column to sample_id and ensure string type
+        phe_df.rename(columns={phe_df.columns[0]: "sample_id"}, inplace=True)
+        phe_df["sample_id"] = phe_df["sample_id"].astype(str)
+        
+        # Load VCF
+        if not os.path.exists(vcf_file):
+            raise FileNotFoundError(f"VCF file not found: {vcf_file}")
+        vcf = pysam.VariantFile(vcf_file)
+        vcf_samples = list(vcf.header.samples)
+        
+        results = []
+
+        # 2. Process each trait
+        traits = qtl_df["trait"].unique()
+        for trait in traits:
+            logger.info(f"Processing trait: {trait}")
+            
+            if trait not in phe_df.columns:
+                logger.warning(f"Trait '{trait}' not found in phenotype file. Skipping.")
+                continue
+            
+            # Get lead SNPs for this trait
+            trait_qtls = qtl_df[qtl_df["trait"] == trait]
+            
+            # Create a lookup for QTL intervals
+            qtl_intervals = {}
+            for _, row in trait_qtls.iterrows():
+                # Ensure bp1 and bp2 exist, otherwise use ps
+                bp1 = row.get("bp1", row["ps"])
+                bp2 = row.get("bp2", row["ps"])
+                qtl_intervals[row["lead"]] = f"{row['chr']}:{bp1}-{bp2}"
+
+            lead_snps = trait_qtls[["chr", "ps", "lead"]].drop_duplicates()
+            
+            if len(lead_snps) < 2:
+                logger.info(f"Trait '{trait}' has fewer than 2 QTLs. Skipping interaction analysis.")
+                continue
+
+            # Identify common samples
+            # Filter phenotype samples that have data for this trait
+            valid_phe_samples = phe_df[phe_df[trait].notna()]["sample_id"].tolist()
+            common_samples = sorted(list(set(vcf_samples) & set(valid_phe_samples)))
+            
+            if len(common_samples) < 10:
+                logger.warning(f"Not enough common samples ({len(common_samples)}) for trait '{trait}'. Skipping.")
+                continue
+            
+            # Extract Genotypes
+            genotypes = {}
+            valid_snp_ids = []
+            
+            for _, row in lead_snps.iterrows():
+                chrom = str(row["chr"])
+                pos = int(row["ps"])
+                snp_id = row["lead"]
+                
+                try:
+                    # pysam fetch uses 0-based start, 1-based end for region? 
+                    # Actually fetch(contig, start, stop) is 0-based, half-open [start, stop).
+                    # VCF pos is 1-based. So base at pos is index pos-1.
+                    # fetch(chrom, pos-1, pos) gets the specific base.
+                    records = list(vcf.fetch(chrom, pos-1, pos))
+                    
+                    # Find exact match for position
+                    target_rec = None
+                    for rec in records:
+                        if rec.pos == pos:
+                            target_rec = rec
+                            break
+                    
+                    if target_rec:
+                        # Extract GTs
+                        gts = []
+                        for sample in common_samples:
+                            gt = target_rec.samples[sample]["GT"]
+                            # Convert to dosage: 0/0->0, 0/1->1, 1/1->2
+                            if gt == (None, None) or None in gt:
+                                gts.append(np.nan)
+                            else:
+                                gts.append(sum(gt))
+                        
+                        genotypes[snp_id] = gts
+                        valid_snp_ids.append(snp_id)
+                    else:
+                        logger.warning(f"SNP {snp_id} at {chrom}:{pos} not found in VCF.")
+                        
+                except ValueError:
+                    logger.warning(f"Could not fetch region {chrom}:{pos} from VCF (check chromosome names).")
+                except Exception as e:
+                    logger.warning(f"Error extracting SNP {snp_id}: {e}")
+
+            if len(valid_snp_ids) < 2:
+                logger.info(f"Not enough valid SNPs extracted for trait '{trait}'.")
+                continue
+
+            # Prepare Analysis DataFrame
+            analysis_df = pd.DataFrame(genotypes, index=common_samples)
+            analysis_df["Y"] = phe_df.set_index("sample_id").loc[common_samples, trait]
+            
+            # Pairwise Interaction Analysis
+            # Iterate over all unique pairs
+            for snp1, snp2 in combinations(valid_snp_ids, 2):
+                # Prepare subset
+                sub_df = analysis_df[["Y", snp1, snp2]].dropna()
+                
+                if len(sub_df) < 10:
+                    continue
+                
+                # Check if SNPs are segregating in this subset
+                if sub_df[snp1].nunique() < 2 or sub_df[snp2].nunique() < 2:
+                    continue
+
+                # OLS Model: Y ~ SNP1 * SNP2
+                # Use Q() to handle special characters in column names
+                formula = f"Y ~ Q('{snp1}') * Q('{snp2}')"
+                
+                try:
+                    model = smf.ols(formula, data=sub_df).fit()
+                    
+                    # Interaction term name
+                    interaction_term = f"Q('{snp1}'):Q('{snp2}')"
+                    
+                    if interaction_term in model.pvalues:
+                        pval = model.pvalues[interaction_term]
+                        beta = model.params[interaction_term]
+                        
+                        # Store result
+                        results.append({
+                            "trait": trait,
+                            "snp1": snp1,
+                            "qtl1": qtl_intervals.get(snp1, "NA"),
+                            "snp2": snp2,
+                            "qtl2": qtl_intervals.get(snp2, "NA"),
+                            "beta": beta,
+                            "p": pval,
+                            "n": len(sub_df),
+                            "r": model.rsquared
+                        })
+                except Exception as e:
+                    # logger.debug(f"Model fit failed for {snp1} x {snp2}: {e}")
+                    pass
+
+        # 3. Save Results
+        if results:
+            res_df = pd.DataFrame(results)
+            
+            # Filter by p-value
+            res_df = res_df[res_df["p"] <= p_threshold]
+            
+            if res_df.empty:
+                logger.info(f"No significant interactions found (p <= {p_threshold}).")
+                return pd.DataFrame()
+
+            # Sort by p-value
+            res_df = res_df.sort_values("p")
+            
+            out_path = os.path.join(out_dir, f"{out_name}.csv")
+            res_df.to_csv(out_path, index=False)
+            logger.info(f"Epistasis analysis completed. Results saved to {out_path}")
+            
+            # Basic Visualization (Optional but requested)
+            self.plot_epistasis(res_df, out_dir, out_name, p_cutoff=p_threshold, genome=genome)
+            
+            return res_df
+        else:
+            logger.info("No interactions calculated.")
+            return pd.DataFrame()
+
+    def plot_epistasis(self, df: pd.DataFrame, out_dir: str, out_name: str, p_cutoff: float = 0.05, genome: str = None):
+        """
+        Plot epistasis results: Network and Linear Interaction (if genome provided).
+        """
+
+        def _plot_network(df: pd.DataFrame, out_dir: str, out_name: str, p_cutoff: float = 0.05):
+            """
+            Plot epistasis network for significant interactions.
+            """
+            # df is already filtered by p_threshold in run_epistasis, but we can filter again if needed
+            sig_df = df[df["p"] < p_cutoff]
+            if sig_df.empty:
+                return
+
+            # Create graph
+            G = nx.Graph()
+            for _, row in sig_df.iterrows():
+                w = -np.log10(row["p"])
+                G.add_edge(row["snp1"], row["snp2"], weight=w, trait=row["trait"])
+
+            plt.figure(figsize=(12, 10))
+            pos = nx.spring_layout(G, k=0.5, seed=42)
+            
+            # Draw
+            nx.draw_networkx_nodes(G, pos, node_size=300, node_color='skyblue', alpha=0.8)
+            nx.draw_networkx_edges(G, pos, width=1.0, alpha=0.5)
+            nx.draw_networkx_labels(G, pos, font_size=8)
+            
+            plt.title(f"Epistasis Network (P < {p_cutoff})")
+            plt.axis('off')
+            
+            png_path = os.path.join(out_dir, f"{out_name}.network.png")
+            pdf_path = os.path.join(out_dir, f"{out_name}.network.pdf")
+            plt.savefig(png_path, dpi=300, bbox_inches='tight')
+            plt.savefig(pdf_path, bbox_inches='tight')
+            plt.close()
+            logger.info(f"Epistasis network plot saved to {png_path} and {pdf_path}")
+
+        def _plot_linear_interaction(df: pd.DataFrame, out_dir: str, out_name: str, genome: str, p_cutoff: float = 0.05):
+            """
+            Plot linear interaction map with Bezier curves.
+            """
+            import matplotlib.path as mpath
+            import matplotlib.patches as mpatches
+            
+            sig_df = df[df["p"] <= p_cutoff].copy()
+            if sig_df.empty:
+                return
+
+            # Load genome
+            try:
+                genome = pd.read_csv(genome, sep="\t", header=None, names=["chr", "len"])
+            except Exception as e:
+                logger.error(f"Failed to read genome file: {e}")
+                return
+
+            # Calculate cumulative offsets with gaps
+            gap = genome["len"].sum() * 0.01
+            offsets = []
+            current_offset = 0
+            for length in genome["len"]:
+                offsets.append(current_offset)
+                current_offset += length + gap
+            genome["offset"] = offsets
+            genome_dict = genome.set_index("chr")["offset"].to_dict()
+            total_len = current_offset - gap
+            
+            # Traits
+            traits = sorted(sig_df["trait"].unique())
+            n_traits = len(traits)
+            # Assign colors
+            cmap = plt.get_cmap("tab20")
+            trait_colors = {t: cmap(i % 20) for i, t in enumerate(traits)}
+            trait_map = {t: i + 1 for i, t in enumerate(traits)} # Start from 1
+            
+            # Setup figure
+            # Height depends on number of traits
+            fig, ax = plt.subplots(figsize=(15, max(4, n_traits * 1.5)))
+            
+            # Draw genome at bottom (y=0)
+            for i, row in genome.iterrows():
+                start = row["offset"]
+                end = start + row["len"]
+                # Alternating colors
+                color = "#e0e0e0" if i % 2 == 0 else "#c0c0c0"
+                ax.plot([start, end], [0, 0], color=color, linewidth=10, solid_capstyle="butt")
+                
+                # Add chr label at the bottom track
+                mid = (start + end) / 2
+                ax.text(mid, -0.3, row["chr"], ha="center", va="top", fontsize=16, rotation=0)
+
+            # Draw vertical chromosome background
+            for i, row in genome.iterrows():
+                start = row["offset"]
+                width = row["len"]
+                # Alternating colors
+                color = "#f0f0f0" if i % 2 == 0 else "#e8e8e8"
+                # Draw rectangle from y=0.5 to y=n_traits+0.5
+                rect = mpatches.Rectangle((start, 0.5), width, n_traits, 
+                                        facecolor=color, edgecolor="none", zorder=0)
+                ax.add_patch(rect)
+
+            # Draw trait labels
+            for trait, y in trait_map.items():
+                ax.text(-total_len * 0.01, y, trait, ha="right", va="center", fontsize=14, color='black')
+
+            # Helper to parse position from "chr:bp1-bp2"
+            def parse_pos(qtl_str):
+                try:
+                    c, span = qtl_str.split(":")
+                    b1, b2 = span.split("-")
+                    pos = (float(b1) + float(b2)) / 2
+                    return c, pos
+                except:
+                    return None, None
+
+            # Draw interactions
+            for _, row in sig_df.iterrows():
+                t = row["trait"]
+                if t not in trait_map: continue
+                y = trait_map[t]
+                color = trait_colors[t]
+                
+                c1, p1 = parse_pos(row["qtl1"])
+                c2, p2 = parse_pos(row["qtl2"])
+                
+                if c1 and c2 and c1 in genome_dict and c2 in genome_dict:
+                    x1 = genome_dict[c1] + p1
+                    x2 = genome_dict[c2] + p2
+                    
+                    # Draw dots
+                    ax.plot(x1, y, 'o', color=color, markersize=10, zorder=3)
+                    ax.plot(x2, y, 'o', color=color, markersize=10, zorder=3)
+
+                    # Draw Bezier curve (Cubic)
+                    # Height of arc. 
+                    arc_height = 0.4
+                    
+                    # Cubic Bezier Curve with control points above the start/end points
+                    # This creates a "vertical" departure/arrival, looking like an arch
+                    verts = [
+                        (x1, y),
+                        (x1, y + arc_height), # Control point 1
+                        (x2, y + arc_height), # Control point 2
+                        (x2, y)
+                    ]
+                    codes = [
+                        mpath.Path.MOVETO,
+                        mpath.Path.CURVE4,
+                        mpath.Path.CURVE4,
+                        mpath.Path.CURVE4
+                    ]
+                    path = mpath.Path(verts, codes)
+                    
+                    # Line width based on -log10(p)
+                    lw = min(3, -np.log10(row["p"]) / 2)
+                    
+                    patch = mpatches.PathPatch(path, facecolor="none", edgecolor=color, alpha=0.6, lw=lw, zorder=2)
+                    ax.add_patch(patch)
+
+            ax.set_xlim(-total_len * 0.02, total_len * 1.02)
+            ax.set_ylim(-0.5, n_traits + 0.8)
+            ax.axis("off")
+            
+            plt.tight_layout()
+            png_path = os.path.join(out_dir, f"{out_name}.interaction.png")
+            pdf_path = os.path.join(out_dir, f"{out_name}.interaction.pdf")
+            plt.savefig(png_path, dpi=300, bbox_inches='tight')
+            plt.savefig(pdf_path, bbox_inches='tight')
+            plt.close()
+            logger.info(f"Epistasis interaction plot saved to {png_path} and {pdf_path}")
+
+        # 1. Network Plot
+        _plot_network(df, out_dir, out_name, p_cutoff)
+
+        # 2. Linear Interaction Plot
+        if genome:
+            if os.path.exists(genome):
+                _plot_linear_interaction(df, out_dir, out_name, genome, p_cutoff)
+            else:
+                logger.warning(f"Genome file not found: {genome}. Skipping interaction plot.")
