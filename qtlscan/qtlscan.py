@@ -536,6 +536,23 @@ def plot_qtl_map(args):
             qtl_df = qtl_df.assign(trait=f"{base_name}_{i}")
         qtl_blocks.append(qtl_df)
     qtl_blocks = pd.concat(qtl_blocks)
+
+    if args.names:
+        names_file = os.path.expanduser(args.names)
+        if os.path.isfile(names_file):
+            try:
+                names_df = pd.read_csv(names_file, sep=None, engine='python', header=None)
+                if names_df.shape[1] >= 2:
+                    name_mapping = dict(zip(names_df.iloc[:, 0].astype(str), names_df.iloc[:, 1].astype(str)))
+                    qtl_blocks['trait'] = qtl_blocks['trait'].replace(name_mapping)
+                    logger.info(f"Renamed traits using mapping from {names_file}")
+                else:
+                    logger.warning(f"Names file {names_file} does not have at least 2 columns. Skipping renaming.")
+            except Exception as e:
+                logger.warning(f"Failed to read names file {names_file}: {e}")
+        else:
+             logger.warning(f"Names file {names_file} not found.")
+
     logger.info(f"Loaded {len(qtl_blocks)} QTL blocks from {len(args.qtl)} files.")
     # Load genome file if provided
     genome = qtl.read_genome_file(args.genome)
@@ -954,7 +971,7 @@ def main():
     )
 
     layout_group = qtl_network_parser.add_argument_group("Layout Options")
-    layout_group.add_argument("--layout", type=str, default="cluster", choices=['spring', 'kamada_kawai', 'fruchterman_reingold', 'forceatlas2'],
+    layout_group.add_argument("--layout", type=str, default="spring", choices=['spring', 'kamada_kawai', 'fruchterman_reingold', 'forceatlas2'],
                                     help="Layout for QTL network (default: %(default)s)")
     layout_group.add_argument("--k", type=float, default=0.3, help="Spring layout parameter k (default: %(default)s)")
     layout_group.add_argument("--seed", type=int, default=42, help="Random seed for deterministic node layouts (default: %(default)s)")
@@ -1061,6 +1078,7 @@ def main():
     # Group for QTL Map
     qtlmap_parser = plot_subparsers.add_parser("qtlmap", help="Generate QTL map")
     qtlmap_parser.add_argument("--qtl", type=str, nargs="+", required=True, help="Path(s) to QTL blocks csv file(s). Multiple files with space separated are allowed.")
+    qtlmap_parser.add_argument("--names", type=str, help="Path to trait name mapping file (two columns: original name, new name)")
     qtlmap_parser.add_argument("--genome", type=str, required=True, help="Path to genome txt file contain chromosome name and length information")
     qtlmap_parser.add_argument("--cw", type=float, default=0.8, help="Chromosome width (default: %(default)s)")
     qtlmap_parser.add_argument("--cm", type=float, default=0.2, help="Chromosome margin (default: %(default)s)")

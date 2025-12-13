@@ -2505,6 +2505,7 @@ class QTLEffect(QTL):
             """
             import matplotlib.path as mpath
             import matplotlib.patches as mpatches
+            import re
             
             sig_df = df[df["p"] <= p_cutoff].copy()
             if sig_df.empty:
@@ -2513,6 +2514,8 @@ class QTLEffect(QTL):
             # Load genome
             try:
                 genome = pd.read_csv(genome, sep="\t", header=None, names=["chr", "len"])
+                genome["len"] = pd.to_numeric(genome["len"], errors='coerce')
+                genome = genome.dropna(subset=["len"])
             except Exception as e:
                 logger.error(f"Failed to read genome file: {e}")
                 return
@@ -2550,7 +2553,9 @@ class QTLEffect(QTL):
                 
                 # Add chr label at the bottom track
                 mid = (start + end) / 2
-                ax.text(mid, -0.3, row["chr"], ha="center", va="top", fontsize=16, rotation=0)
+                label = str(row["chr"])
+                label = re.sub(r"^(chr|scaffold|chromosome)", "", label, flags=re.IGNORECASE)
+                ax.text(mid, -0.3, label, ha="center", va="top", fontsize=16, rotation=0)
 
             # Draw vertical chromosome background
             for i, row in genome.iterrows():
