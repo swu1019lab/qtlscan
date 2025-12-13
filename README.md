@@ -20,7 +20,7 @@
 
 ### Key Features
 
-* **⚡ Automated QTL Mapping:** Efficiently merges GWAS signals into defined QTL blocks based on LD patterns.
+* **⚡ Automated QTL Scan:** Efficiently merges GWAS signals into defined QTL blocks based on LD patterns.
 * **🧬 Epistatic Interaction:** Detects pairwise non-additive effects (epistasis) between identifying loci
 * **🕸️ Genetic Networks:** Constructs and visualizes complex trait-associated networks using graph theory layouts (Spring, Kamada-Kawai, ForceAtlas2).
 * **📊 High-Quality Visualization:** Generates publication-ready figures including Manhattan plots, LD heatmaps with gene tracks, QTL distribution maps, and QTN haplotype heatmaps.
