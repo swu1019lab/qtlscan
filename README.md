@@ -82,6 +82,27 @@ qtlscan phe split \
     --prefix trait
 ```
 
+#### `phe merge`
+Merge single-trait files on sample ID into one multi-trait table.
+
+**Parameters:**
+*   `--files`: Input single-trait files (TXT/TSV/CSV/PLINK) **[Required]**
+*   `--trait-names`: Comma-separated new trait names (default: from inputs)
+*   `--sample-col`: Sample ID column name for TXT/TSV/CSV inputs (default: first column)
+*   `--out-format`: Output format (non-PLINK) (choices: txt, tsv, csv) (default: tsv)
+*   `--out-dir`: Output directory (default: .)
+*   `--out-name`: Output file name (without extension) (default: phe_merged)
+*   `--out-sample-col`: Rename output sample column (default: sample)
+*   `--encoding`: File encoding (default: utf-8)
+
+**Example:**
+```bash
+qtlscan phe merge \
+    --files data/phe/split/trait.Yield.phe data/phe/split/trait.Height.phe \
+    --out-name merged_phenotypes \
+    --out-format csv
+```
+
 #### `phe stat`
 Compute phenotype statistics and plot distribution.
 
@@ -317,6 +338,60 @@ qtlscan plot ldheatmap \
     --out_name Yield_A08_Heatmap
 ```
 
+#### QTL Distribution Map (`qtlmap`)
+
+Visualize the distribution of QTLs across the genome.
+
+**Parameters:**
+*   `--qtl`: Path(s) to QTL blocks csv file(s). Multiple files with space separated are allowed. **[Required]**
+*   `--genome`: Path to genome txt file contain chromosome name and length information **[Required]**
+*   `--names`: Path to trait name mapping file (two columns: original name, new name)
+*   `--cw`: Chromosome width (default: 0.8)
+*   `--cm`: Chromosome margin (default: 0.2)
+*   `--cs`: Chromosome spacing (default: 0.5)
+*   `--cr`: Chromosome rounding (default: 0.3)
+*   `--fc`: Chromosome facecolor (default: lightgrey)
+*   `--ec`: Chromosome edgecolor (default: black)
+*   `--ew`: Chromosome edgewidth (default: 0.8)
+*   `--orientation`: Layout orientation for chromosomes (choices: vertical, horizontal) (default: vertical)
+*   `--unit`: Unit for displaying genomic positions (choices: mb, kb, bp) (default: mb)
+*   `--colors`: Trait color specification: comma-separated list, matplotlib colormap name, or path to trait-color table
+*   `--title`: Figure title
+*   `--subtitle`: Optional subtitle placed beneath the title
+*   `--legend-title`: Legend title (default: Traits)
+*   `--legend-loc`: Legend location (e.g., upper left)
+*   `--legend-ncol`: Number of legend columns
+*   `--legend-anchor`: Legend bbox_to_anchor as 'x,y' (optional)
+*   `--font-family`: Font family applied to the plot (default: Arial)
+*   `--title-fontsize`: Font size for title (default: 18)
+*   `--subtitle-fontsize`: Font size for subtitle (default: 12)
+*   `--label-fontsize`: Font size for axis labels (default: 12)
+*   `--tick-fontsize`: Font size for tick labels (default: 10)
+*   `--annotation`: Optional annotation file with columns chr,bp1,bp2,label
+*   `--annotation-sep`: Delimiter for annotation file (default: infer from extension)
+*   `--annotation-max-width`: Maximum characters per annotation line before wrapping (default: 28)
+*   `--annotation-line-spacing`: Line spacing multiplier for annotation text (default: 1.2)
+*   `--annotation-arrowstyle`: Arrow style for annotations (default: -)
+*   `--annotation-boxstyle`: Box style for annotation text (default: round,pad=0.2)
+*   `--annotation-facecolor`: Face color for annotation boxes (default: white)
+*   `--annotation-edgecolor`: Edge color for annotation boxes (default: none)
+*   `--dpi`: Figure DPI (default: 300)
+*   `--width`: Figure width (default: 10)
+*   `--height`: Figure height (default: 8)
+*   `--format`: Output format, e.g., pdf or png (default: png)
+*   `--out_dir`: Output directory (default: .)
+*   `--out_name`: Output file name prefix (default: output)
+
+**Example:**
+```bash
+qtlscan plot qtlmap \
+    --qtl results/qtl/Yield_QTL.blocks.csv results/qtl/Height_QTL.blocks.csv \
+    --genome data/genome.len \
+    --orientation vertical \
+    --out_dir plots \
+    --out_name QTL_Distribution
+```
+
 #### QTN Genotype Map (`qtnmap`)
 
 Visualize allelic distribution across the population for identified loci.
@@ -342,6 +417,44 @@ qtlscan plot qtnmap \
     --samples_file data/sample_groups.txt \
     --out_dir plots \
     --out_name Yield_QTN_Map
+```
+
+#### Data Distribution Plot (`dist`)
+
+Generate data distribution plots (Box, Violin, Histogram, KDE).
+
+**Parameters:**
+*   `--data`: Path to data file (CSV/TSV format) **[Required]**
+*   `--kind`: Kind of distribution plot (choices: box, violin, hist, kde) (default: box)
+*   `--columns`: Comma-separated column names or path to file containing column names. If not provided, all numeric columns will be used
+*   `--colors`: Comma-separated color list for each column
+*   `--alpha`: Transparency level (0-1) (default: 0.7)
+*   `--orientation`: Plot orientation (choices: vertical, horizontal) (default: vertical)
+*   `--bins`: Number of bins for histogram (default: 30)
+*   `--density`: Show density instead of count for histogram (default: False)
+*   `--fit_curve`: Add fitted curve for histogram (default: False)
+*   `--fit_bins`: Number of bins for fitted curve in histogram (default: 100)
+*   `--hist_style`: Style for multiple columns in histogram (choices: stack, dodge, side) (default: dodge)
+*   `--kde_style`: Style for multiple columns in KDE plot (choices: stack, side) (default: stack)
+*   `--kde_points`: Number of points for KDE calculation (default: 200)
+*   `--extend_tail`: Extend factor for smaller values (left boundary) in kde plot, range: 0-1 (default: 0.0)
+*   `--extend_head`: Extend factor for larger values (right boundary) in kde plot, range: 0-1 (default: 0.0)
+*   `--xlabel`: Custom label for x-axis
+*   `--ylabel`: Custom label for y-axis
+*   `--width`: Figure width (default: 4)
+*   `--height`: Figure height (default: 3)
+*   `--format`: Output format, e.g., pdf or png (default: png)
+*   `--out_dir`: Output directory (default: .)
+*   `--out_name`: Output file name prefix (default: output)
+
+**Example:**
+```bash
+qtlscan plot dist \
+    --data data/phenotypes.csv \
+    --kind violin \
+    --columns Yield,Height \
+    --out_dir plots \
+    --out_name Phenotype_Distribution
 ```
 
 ## 📂 Input & Output
