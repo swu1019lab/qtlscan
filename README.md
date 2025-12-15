@@ -457,6 +457,27 @@ qtlscan plot dist \
     --out_name Phenotype_Distribution
 ```
 
+### 6\. Interactive Reporting (`report`)
+
+Generate an interactive HTML summary for QTL blocks.
+
+**Parameters:**
+*   `--qtl`: Path(s) to QTL blocks csv file(s) **[Required if --qtl_dir not provided]**
+*   `--qtl_dir`: Directory containing one or more *.blocks.csv files **[Required if --qtl not provided]**
+*   `--names`: Optional comma-separated names or newline-delimited file to rename each QTL dataset
+*   `--top_n`: Number of most significant blocks to highlight (default: 20)
+*   `--out_dir`: Output directory (default: .)
+*   `--out_name`: Output HTML file name prefix (default: qtl_report)
+
+**Example:**
+```bash
+qtlscan report \
+    --qtl results/qtl/Yield_QTL.blocks.csv \
+    --names Yield \
+    --out_dir results/report \
+    --out_name Yield_Report
+```
+
 ## 📂 Input & Output
 
 ### Input Files
